@@ -24,7 +24,7 @@ PRICING_MAP = [
 
 def get_default_search_keys():
     return [
-        'productIntroEn',
+        'productModel',
         'productIntroEn',
         'revision',
         'keywords',
