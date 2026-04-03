@@ -481,6 +481,14 @@ def supplier_search(supplier: str, part_number: str, test_mode=False) -> dict:
     if part_cache:
         cprint(f'\n[MAIN]\tUsing {supplier} cached data for {part_number}', silent=settings.SILENT)
         part_info = part_cache
+
+        if supplier == 'TME':
+            cache_has_datasheet = bool(part_info.get('Datasheet') or part_info.get('datasheet'))
+            if not cache_has_datasheet:
+                refreshed_part = tme_api.fetch_part_info(part_number)
+                if refreshed_part:
+                    part_info = refreshed_part
+                    search_api.save_to_file(part_info, search_filename, update_ts=True)
     else:
         cprint(f'\n[MAIN]\t{supplier} search for {part_number}', silent=settings.SILENT)
         if supplier == 'Digi-Key':
@@ -659,9 +667,15 @@ def inventree_create(part_info: dict, stock=None, kicad=False, symbol=None, foot
             elif inventree_part['image']:
                 if enable_upload:
                     # Add image
-                    image_result = inventree_api.upload_part_image(inventree_part['image'], part_pk, silent=settings.SILENT)
+                    image_result = inventree_api.upload_part_image(
+                        inventree_part['image'],
+                        part_pk,
+                        supplier=inventree_part.get('supplier_name', ''),
+                        silent=settings.SILENT,
+                    )
                     if not image_result:
                         cprint('[TREE]\tWarning: Failed to upload part image', silent=settings.SILENT)
+        
         if inventree_part['datasheet'] and settings.DATASHEET_UPLOAD:
             if enable_upload:
                 # Upload datasheet
@@ -669,12 +683,18 @@ def inventree_create(part_info: dict, stock=None, kicad=False, symbol=None, foot
                     datasheet_url=inventree_part['datasheet'],
                     part_ipn=inventree_part['IPN'],
                     part_pk=part_pk,
+                    supplier=inventree_part.get('supplier_name', ''),
                     silent=settings.SILENT,
                 )
                 if not datasheet_link:
                     cprint('[TREE]\tWarning: Failed to upload part datasheet', silent=settings.SILENT)
                 else:
                     cprint('[TREE]\tSuccess: Uploaded part datasheet', silent=settings.SILENT)
+        elif settings.DATASHEET_UPLOAD:
+            cprint(
+                f'[TREE]\tWarning: Datasheet upload skipped (missing URL) for supplier={inventree_part.get("supplier_name", "")}',
+                silent=settings.SILENT,
+            )
 
         if kicad:
             try:
@@ -846,7 +866,12 @@ def inventree_create_alternate(part_info: dict, part_id='', part_ipn='', show_pr
             inventree_api.update_part(pk=part_pk,
                                       data={'existing_image': existing_image})
         elif image:
-            inventree_api.upload_part_image(image_url=image, part_id=part_pk, silent=settings.SILENT)
+            inventree_api.upload_part_image(
+                image_url=image,
+                part_id=part_pk,
+                supplier=part_info.get('supplier_name', ''),
+                silent=settings.SILENT,
+            )
 
     # create or update parameters
     if inventree_part.get('parameters', {}):
@@ -867,12 +892,15 @@ def inventree_create_alternate(part_info: dict, part_id='', part_ipn='', show_pr
                 datasheet_url=datasheet,
                 part_ipn=part_ipn,
                 part_pk=part_id,
+                supplier=part_info.get('supplier_name', ''),
                 silent=settings.SILENT,
             )
             if not part_info['datasheet']:
                 cprint('[TREE]\tWarning: Failed to upload part datasheet', silent=settings.SILENT)
             else:
                 cprint('[TREE]\tSuccess: Uploaded part datasheet', silent=settings.SILENT)
+        else:
+            cprint('[TREE]\tWarning: Datasheet upload skipped (missing URL)', silent=settings.SILENT)
     # if an attachment is present, set it as the datasheet field
     if attachment:
         part_info['datasheet'] = f'{inventree_api.inventree_api.base_url.strip("/")}{attachment[0]["attachment"]}'

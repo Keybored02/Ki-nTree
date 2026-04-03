@@ -1,4 +1,6 @@
 import os
+import re
+import urllib.parse
 
 from ..config import settings, config_interface
 from mouser.api import MouserPartSearchRequest
@@ -61,6 +63,99 @@ def find_categories(part_details: str):
         return part_details['Category'], None
     except:
         return None, None
+
+
+def _extract_mouser_datasheet_url(product_url: str, timeout: int = 20, silent: bool = True) -> str:
+    '''Extract datasheet URL from Mouser product detail page when API omits DataSheetUrl.'''
+
+    from ..common.tools import cprint
+
+    if not product_url:
+        return ''
+
+    def normalize_url(url: str, base: str) -> str:
+        candidate = (url or '').strip()
+        if not candidate:
+            return ''
+        return urllib.parse.urljoin(base, candidate)
+
+    # First try Playwright (handles dynamic content reliably).
+    try:
+        from playwright.sync_api import sync_playwright
+
+        timeout_ms = max(5000, int(timeout * 1000))
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            try:
+                page.goto(product_url, wait_until='domcontentloaded', timeout=timeout_ms)
+            except Exception:
+                browser.close()
+                page = None
+
+            if page:
+                selectors = [
+                    'a#lnkDatasheet',
+                    'a[data-testid*="datasheet"]',
+                    'a[href*="DocumentDelivery"]',
+                    'a[href*="/datasheet/"]',
+                    'a[href*=".pdf"]',
+                ]
+
+                for selector in selectors:
+                    try:
+                        for link in page.locator(selector).all():
+                            href = link.get_attribute('href')
+                            full_url = normalize_url(href, page.url or product_url)
+                            if not full_url:
+                                continue
+                            if any(token in full_url.lower() for token in ['.pdf', 'documentdelivery', 'datasheet']):
+                                browser.close()
+                                return full_url
+                    except Exception:
+                        continue
+
+                # Fallback to whole-page HTML search.
+                try:
+                    html = page.content()
+                    match = re.search(
+                        r'href=["\']([^"\']*(?:DocumentDelivery|datasheet|\.pdf)[^"\']*)["\']',
+                        html,
+                        flags=re.IGNORECASE,
+                    )
+                    if match:
+                        browser.close()
+                        return normalize_url(match.group(1), page.url or product_url)
+                except Exception:
+                    pass
+
+                browser.close()
+    except Exception:
+        pass
+
+    # Secondary fallback: static requests parse.
+    try:
+        import requests
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                          '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        }
+        response = requests.get(product_url, headers=headers, timeout=timeout, allow_redirects=True)
+        html = response.text or ''
+        match = re.search(
+            r'href=["\']([^"\']*(?:DocumentDelivery|datasheet|\.pdf)[^"\']*)["\']',
+            html,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return normalize_url(match.group(1), response.url or product_url)
+    except Exception:
+        pass
+
+    cprint('[INFO]\tWarning: Mouser fallback could not find datasheet link on product page', silent=silent)
+    return ''
 
 
 def fetch_part_info(part_number: str) -> dict:

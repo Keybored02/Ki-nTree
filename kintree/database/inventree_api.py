@@ -1,7 +1,7 @@
 from ..config import settings
 import validators
 from ..common import part_tools
-from ..common.tools import cprint, download_with_retry
+from ..common.tools import cprint, download_with_retry, validate_downloaded_file
 from ..config import config_interface
 import re
 
@@ -440,7 +440,7 @@ def create_category(parent: str, name: str):
     return category_pk, is_new_category
 
 
-def upload_part_image(image_url: str, part_id: int, silent=False) -> bool:
+def upload_part_image(image_url: str, part_id: int, supplier: str = '', silent=False) -> bool:
     ''' Upload InvenTree part thumbnail'''
     global inventree_api
 
@@ -449,7 +449,7 @@ def upload_part_image(image_url: str, part_id: int, silent=False) -> bool:
     image_location = settings.search_images + image_name
 
     # Download image (multiple attempts)
-    if not download_with_retry(image_url, image_location, filetype='Image', silent=silent):
+    if not download_with_retry(image_url, image_location, filetype='Image', supplier=supplier, silent=silent):
         return False
 
     # Upload image to InvenTree
@@ -463,9 +463,15 @@ def upload_part_image(image_url: str, part_id: int, silent=False) -> bool:
         return False
 
 
-def upload_part_datasheet(datasheet_url: str, part_ipn: int, part_pk: int, silent=False) -> str:
+def upload_part_datasheet(datasheet_url: str, part_ipn: int, part_pk: int, supplier: str = '', silent=False) -> str:
     ''' Upload InvenTree part attachment'''
     global inventree_api
+
+    if not datasheet_url:
+        cprint(f'[TREE]\tWarning: Datasheet upload skipped - missing URL (supplier={supplier})', silent=silent)
+        return ''
+
+    cprint(f'[TREE]\tDatasheet upload: url={datasheet_url}, ipn={part_ipn}, pk={part_pk}, supplier={supplier}', silent=silent)
 
     datasheet_name = f'{part_ipn}.pdf'
     # Get datasheet path based on user settings for local storage
@@ -474,16 +480,45 @@ def upload_part_datasheet(datasheet_url: str, part_ipn: int, part_pk: int, silen
     else:
         datasheet_location = os.path.join(settings.search_datasheets, datasheet_name)
 
-    if not os.path.isfile(datasheet_location):
+    cprint(f'[TREE]\tDatasheet location: {datasheet_location}', silent=silent)
+
+    needs_download = True
+
+    if os.path.isfile(datasheet_location):
+        if validate_downloaded_file(
+            file_path=datasheet_location,
+            filetype='PDF',
+            source_url=datasheet_url,
+            silent=silent,
+        ):
+            cprint(f'[INFO]\tUsing existing valid datasheet file: {datasheet_location}', silent=silent)
+            needs_download = False
+        else:
+            cprint(f'[INFO]\tExisting datasheet file is invalid, re-downloading: {datasheet_location}', silent=silent)
+
+    if needs_download:
+        cprint(f'[TREE]\tDownloading datasheet: {datasheet_url}', silent=silent)
         # Download datasheet (multiple attempts)
         if not download_with_retry(
             datasheet_url,
             datasheet_location,
             filetype='PDF',
-            timeout=10,
+            timeout=30,
+            supplier=supplier,
             silent=silent,
         ):
+            cprint(f'[TREE]\tDatasheet download failed: {datasheet_url}', silent=silent)
             return ''
+
+    # Final guard: ensure the file that is about to be uploaded is a valid PDF.
+    if not validate_downloaded_file(
+        file_path=datasheet_location,
+        filetype='PDF',
+        source_url=datasheet_url,
+        silent=silent,
+    ):
+        cprint('[TREE]\tWarning: Datasheet file failed validation before upload', silent=silent)
+        return ''
 
     # Upload Datasheet to InvenTree
     part = Part(inventree_api, part_pk)
@@ -491,7 +526,8 @@ def upload_part_datasheet(datasheet_url: str, part_ipn: int, part_pk: int, silen
         try:
             attachment = part.uploadAttachment(attachment=datasheet_location)
             return f'{inventree_api.base_url.strip("/")}{attachment["attachment"]}'
-        except Exception:
+        except Exception as e:
+            cprint(f'[TREE]\tWarning: Datasheet upload failed: {repr(e)}', silent=silent)
             return ''
     else:
         return ''
