@@ -65,7 +65,7 @@ def setup_environment(force=False) -> bool:
 
 def get_default_search_keys():
     return [
-        'product_description',
+        'manufacturer_product_number',
         'product_description',
         'revision',
         'keywords',
@@ -148,8 +148,10 @@ def fetch_part_info(part_number: str) -> dict:
             if key == 'manufacturer':
                 part_info[key] = part['manufacturer'].get('name')
             elif key == 'description':
-                part_info['product_description'] = part['description'].get('product_description')
-                part_info['detailed_description'] = part['description'].get('detailed_description')
+                product_name = part['description'].get('product_description')
+                part_info['product_name'] = product_name
+                part_info['product_description'] = product_name
+                part_info['detailed_description'] = part['description'].get('detailed_description') or product_name
             else:
                 part_info[key] = part[key]
 
