@@ -463,7 +463,13 @@ def upload_part_image(image_url: str, part_id: int, supplier: str = '', silent=F
         return False
 
 
-def upload_part_datasheet(datasheet_url: str, part_ipn: int, part_pk: int, supplier: str = '', silent=False) -> str:
+def _safe_filename(value: str, fallback: str = 'datasheet') -> str:
+    cleaned = re.sub(r'[\\/:*?"<>|]+', '_', str(value or '').strip())
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip(' .')
+    return cleaned or fallback
+
+
+def upload_part_datasheet(datasheet_url: str, part_name: str, part_pk: int, supplier: str = '', silent=False) -> str:
     ''' Upload InvenTree part attachment'''
     global inventree_api
 
@@ -471,9 +477,9 @@ def upload_part_datasheet(datasheet_url: str, part_ipn: int, part_pk: int, suppl
         cprint(f'[TREE]\tWarning: Datasheet upload skipped - missing URL (supplier={supplier})', silent=silent)
         return ''
 
-    cprint(f'[TREE]\tDatasheet upload: url={datasheet_url}, ipn={part_ipn}, pk={part_pk}, supplier={supplier}', silent=silent)
+    cprint(f'[TREE]\tDatasheet upload: url={datasheet_url}, name={part_name}, pk={part_pk}, supplier={supplier}', silent=silent)
 
-    datasheet_name = f'{part_ipn}.pdf'
+    datasheet_name = f'{_safe_filename(part_name)}.pdf'
     # Get datasheet path based on user settings for local storage
     if settings.DATASHEET_SAVE_ENABLED:
         datasheet_location = os.path.join(settings.DATASHEET_SAVE_PATH, datasheet_name)

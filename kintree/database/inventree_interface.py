@@ -681,7 +681,7 @@ def inventree_create(part_info: dict, stock=None, kicad=False, symbol=None, foot
                 # Upload datasheet
                 datasheet_link = inventree_api.upload_part_datasheet(
                     datasheet_url=inventree_part['datasheet'],
-                    part_ipn=inventree_part['IPN'],
+                    part_name=inventree_part['name'],
                     part_pk=part_pk,
                     supplier=inventree_part.get('supplier_name', ''),
                     silent=settings.SILENT,
@@ -890,7 +890,7 @@ def inventree_create_alternate(part_info: dict, part_id='', part_ipn='', show_pr
         if datasheet:
             part_info['datasheet'] = inventree_api.upload_part_datasheet(
                 datasheet_url=datasheet,
-                part_ipn=part_ipn,
+                part_name=part_info.get('name', '') or part.name,
                 part_pk=part_id,
                 supplier=part_info.get('supplier_name', ''),
                 silent=settings.SILENT,
