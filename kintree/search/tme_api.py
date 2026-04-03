@@ -100,16 +100,58 @@ def tme_api_query(request: urllib.request.Request) -> dict:
 
 
 def fetch_part_info(part_number: str) -> dict:
+    def normalize_symbol(symbol: str) -> str:
+        return str(symbol or '').strip().upper()
 
     def search_product(response):
-        found = False
-        index = 0
-        for product in response['Data']['ProductList']:
-            if product['Symbol'] == part_number:
-                found = True
-                break
-            index = index + 1
-        return found, index
+        target = normalize_symbol(part_number)
+        product_list = response.get('Data', {}).get('ProductList', [])
+        for index, product in enumerate(product_list):
+            symbol = normalize_symbol(product.get('Symbol', ''))
+            original_symbol = normalize_symbol(product.get('OriginalSymbol', ''))
+            if target in [symbol, original_symbol]:
+                return True, index
+        return False, 0
+
+    def normalize_file_url(file_url: str) -> str:
+        if not file_url:
+            return ''
+        if file_url.startswith('//'):
+            return f'https:{file_url}'
+        if file_url.startswith('http://') or file_url.startswith('https://'):
+            return file_url
+        return f'https://www.tme.eu{file_url}'
+
+    def fetch_datasheet_from_product_files() -> str:
+        params = {'SymbolList[0]': part_number}
+        files_response = tme_api_query(tme_api_request('/Products/GetProductsFiles', tme_api_settings, params))
+
+        if files_response is None or files_response.get('Status') != 'OK':
+            return ''
+
+        found_files, files_index = search_product(files_response)
+        if not found_files:
+            return ''
+
+        files_data = files_response['Data']['ProductList'][files_index].get('Files', {})
+        document_list = files_data.get('DocumentList', [])
+        if not document_list:
+            return ''
+
+        # Prefer explicit documentation first, then accept any PDF.
+        preferred_order = ['DTE', 'INS', 'KCH', 'GWA']
+        for doc_type in preferred_order:
+            for doc in document_list:
+                if doc.get('DocumentType') == doc_type:
+                    document_url = normalize_file_url(doc.get('DocumentUrl', ''))
+                    return document_url
+
+        for doc in document_list:
+            document_url = normalize_file_url(doc.get('DocumentUrl', ''))
+            if document_url.lower().endswith('.pdf'):
+                return document_url
+
+        return ''
 
     tme_api_settings = config_interface.load_file(settings.CONFIG_TME_API)
     params = {'SymbolList[0]': part_number}
@@ -136,60 +178,36 @@ def fetch_part_info(part_number: str) -> dict:
     part_info['subcategory'] = None
 
     # query the parameters
+    part_info['parameters'] = {}
     params = {'SymbolList[0]': part_number}
     response = tme_api_query(tme_api_request('/Products/GetParameters', tme_api_settings, params))
-    # check if accidentally no data returned
-    if response is None or response['Status'] != 'OK':
-        return part_info
-
-    found, index = search_product(response)
-
-    if not found:
-        return part_info
-
-    part_info['parameters'] = {}
-    for param in response['Data']['ProductList'][index]["ParameterList"]:
-        part_info['parameters'][param['ParameterName']] = param['ParameterValue']
+    if response is not None and response.get('Status') == 'OK':
+        found, index = search_product(response)
+        if found:
+            for param in response['Data']['ProductList'][index].get('ParameterList', []):
+                part_info['parameters'][param.get('ParameterName', '')] = param.get('ParameterValue', '')
 
     # query the prices
+    part_info['pricing'] = {}
+    part_info['currency'] = 'USD'
     params = {'SymbolList[0]': part_number, 'Curreny': 'USD'}
     response = tme_api_query(tme_api_request('/Products/GetPrices', tme_api_settings, params))
-    # check if accidentally no data returned
-    if response is None or response['Status'] != 'OK':
-        return part_info
+    if response is not None and response.get('Status') == 'OK':
+        found, index = search_product(response)
+        if found:
+            [pricing_key, qty_key, price_key, currency_key] = PRICING_MAP
+            for price_break in response['Data']['ProductList'][index].get(pricing_key, []):
+                quantity = price_break.get(qty_key)
+                price = price_break.get(price_key)
+                if quantity is not None and price is not None:
+                    part_info['pricing'][quantity] = price
+            part_info['currency'] = response.get('Data', {}).get(currency_key, 'USD')
 
-    found, index = search_product(response)
+    # Always perform second query for files/documentation (per API docs).
+    datasheet_url = fetch_datasheet_from_product_files()
+    if datasheet_url:
+        part_info['Datasheet'] = datasheet_url
 
-    if not found:
-        part_info['currency'] = 'USD'
-        return part_info
-
-    part_info['pricing'] = {}
-    [pricing_key, qty_key, price_key, currency_key] = PRICING_MAP
-
-    for price_break in response['Data']['ProductList'][index][pricing_key]:
-        quantity = price_break[qty_key]
-        price = price_break[price_key]
-        part_info['pricing'][quantity] = price
-
-    part_info['currency'] = response['Data'][currency_key]
-
-    # Query the files associated to the product
-    params = {'SymbolList[0]': part_number}
-    response = tme_api_query(tme_api_request('/Products/GetProductsFiles', tme_api_settings, params))
-    # check if accidentally no products returned
-    if response is None or response['Status'] != 'OK':
-        return part_info
-
-    found, index = search_product(response)
-
-    if not found:
-        return part_info
-
-    for doc in response['Data']['ProductList'][index]['Files']['DocumentList']:
-        if doc['DocumentType'] == 'DTE':
-            part_info['Datasheet'] = 'http:' + doc['DocumentUrl']
-            break
     return part_info
 
 
