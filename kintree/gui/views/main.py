@@ -1,5 +1,6 @@
 import os
 import copy
+from importlib import import_module
 import flet as ft
 
 # Version
@@ -1231,7 +1232,6 @@ class CreateView(MainView):
     fields = {
         'inventree_progress': ft.ProgressBar(height=32, width=420, value=0),
         'kicad_progress': ft.ProgressBar(height=32, width=420, value=0),
-        'bulk_progress': ft.ProgressBar(height=32, width=420, value=0),
         'bulk_status': ft.Text(value='Bulk import idle', size=16),
         'bulk_excel_path': ft.TextField(
             label='Bulk Excel File',
@@ -1248,7 +1248,7 @@ class CreateView(MainView):
                 ]
             ),
             height=GUI_PARAMS['button_height'],
-            width=GUI_PARAMS['button_width'] * 1.4,
+            width=GUI_PARAMS['button_width'] * 1.8,
         ),
         'bulk_import': ft.ElevatedButton(
             content=ft.Row(
@@ -1300,7 +1300,10 @@ class CreateView(MainView):
         return header
 
     def _parse_bulk_excel_rows(self, file_path: str):
-        from openpyxl import load_workbook
+        try:
+            load_workbook = import_module('openpyxl').load_workbook
+        except ModuleNotFoundError as exc:
+            raise RuntimeError('openpyxl is required for Excel import') from exc
 
         workbook = load_workbook(filename=file_path, data_only=True)
         sheet = workbook.active
@@ -1416,9 +1419,9 @@ class CreateView(MainView):
         failed = 0
         failures = []
 
-        progress.reset_progress_bar(self.fields['bulk_progress'])
+        progress.reset_progress_bar(self.fields['inventree_progress'])
         self.fields['bulk_status'].value = f'Preparing bulk import: 0/{total}'
-        self.fields['bulk_progress'].update()
+        self.fields['inventree_progress'].update()
         self.fields['bulk_status'].update()
 
         for idx, row in enumerate(rows, start=1):
@@ -1483,14 +1486,20 @@ class CreateView(MainView):
                     f"Row {row['excel_row']}: failed to create '{row['search_name']}' in category '{row['inventree_category']}'"
                 )
 
-            self.fields['bulk_progress'].value = idx / total
+            self.fields['inventree_progress'].value = idx / total
             self.fields['bulk_status'].value = f'Processing row {idx}/{total} | success={success} failed={failed}'
-            self.fields['bulk_progress'].update()
+            self.fields['inventree_progress'].update()
             self.fields['bulk_status'].update()
 
-        self.fields['bulk_progress'].value = 1.0
+        self.fields['inventree_progress'].value = 1.0
+        if failed == 0:
+            self.fields['inventree_progress'].color = 'green'
+        elif success > 0:
+            self.fields['inventree_progress'].color = 'amber'
+        else:
+            self.fields['inventree_progress'].color = 'red'
         self.fields['bulk_status'].value = f'Bulk import complete: success={success} failed={failed}'
-        self.fields['bulk_progress'].update()
+        self.fields['inventree_progress'].update()
         self.fields['bulk_status'].update()
 
         cprint(
@@ -1854,30 +1863,16 @@ class CreateView(MainView):
         self.column = ft.Column(
             controls=[
                 ft.Row(),
-                ft.Row(
-                    controls=[
-                        ft.Text('Bulk Progress', size=16, weight=ft.FontWeight.BOLD, width=140),
-                        self.fields['bulk_progress'],
-                        self.fields['bulk_status'],
-                    ],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    width=900,
-                ),
+                ft.Row(controls=[self.fields['bulk_status']], alignment=ft.MainAxisAlignment.CENTER, width=900),
                 ft.Row(height=10),
                 ft.Row(
                     controls=[
                         self.fields['bulk_excel_path'],
                         self.fields['bulk_excel_pick'],
-                    ],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    width=700,
-                ),
-                ft.Row(
-                    controls=[
                         self.fields['bulk_import'],
                     ],
                     alignment=ft.MainAxisAlignment.CENTER,
-                    width=700,
+                    width=980,
                 ),
                 ft.Row(height=10),
                 ft.Row(
