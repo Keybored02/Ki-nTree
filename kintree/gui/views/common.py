@@ -357,41 +357,55 @@ class DropdownWithSearch(ft.UserControl):
                 new_list_options.append(option)
         return new_list_options
 
+    @staticmethod
+    def _safe_update(control):
+        try:
+            control.update()
+        except AssertionError:
+            pass
+
     def on_search(self, e):
         if self.search_field.value.replace(' ', ''):
-            self.dropdown.options = self.update_option_list(self.search_field.value)
-            if len(self.dropdown.options) == 1:
+            filtered_options = self.update_option_list(self.search_field.value)
+            self.dropdown.options = filtered_options
+            if len(filtered_options) == 1:
                 self.dropdown.value = self.dropdown.options[0].key
-                self.on_change(e, label=self.label, value=self.value)
+                if self.on_change:
+                    self.on_change(e, label=self.label, value=self.value)
+            elif len(filtered_options) == 0:
+                self.dropdown.value = self.search_field.value
+                if self.on_change:
+                    self.on_change(e, label=self.label, value=self.value)
             else:
                 self.dropdown.value = None
         else:
             self.dropdown.options = self._options
-        self.dropdown.update()
-        self.on_change()
+        self._safe_update(self.dropdown)
+        if self.on_change:
+            self.on_change()
 
     def search_now(self, e):
         self.search_box.width = self.search_width
-        self.search_box.update()
+        self._safe_update(self.search_box)
         self.search_button.icon = 'highlight_remove'
         self.search_button.on_click = self.done_search
-        self.search_button.update()
+        self._safe_update(self.search_button)
         self.search_field.border = "outline"
-        self.search_field.update()
+        self._safe_update(self.search_field)
         self.search_field.focus()
         if self.search_field.value:
             self.on_search(e)
     
     def done_search(self, e=None):
         self.search_box.width = 0
-        self.search_box.update()
+        self._safe_update(self.search_box)
         self.search_button.icon = 'search'
         self.search_button.on_click = self.search_now
-        self.search_button.update()
+        self._safe_update(self.search_button)
         self.search_field.border = "none"
-        self.search_field.update()
+        self._safe_update(self.search_field)
         self.options = self._options
-        self.dropdown.update()
+        self._safe_update(self.dropdown)
 
         
 class MenuButton(ft.Container):

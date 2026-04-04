@@ -618,12 +618,16 @@ def link_barcode(barcode: str, part_pk: int = None, stocklocation_pk: int = None
     try:
         response = requests.post(endpoint, headers=headers, json=payload, timeout=20)
         if response.status_code in [200, 201]:
+            cprint(f'[TREE]\tSuccess: Barcode "{payload["barcode"]}" linked to part {part_pk}', silent=settings.SILENT)
             return True
 
+        # Log detailed error information for debugging
+        error_body = response.text[:500] if response.text else "(empty response)"
         cprint(
-            f"[TREE]\tWarning: Barcode link failed (status={response.status_code})",
+            f"[TREE]\tWarning: Barcode link failed (status={response.status_code}, barcode='{payload['barcode']}', part_pk={part_pk})",
             silent=settings.SILENT,
         )
+        cprint(f"[TREE]\tResponse: {error_body}", silent=settings.SILENT)
         return False
     except Exception as exc:
         cprint(f'[TREE]\tWarning: Barcode link request failed: {repr(exc)}', silent=settings.SILENT)

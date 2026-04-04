@@ -691,25 +691,27 @@ def inventree_create(part_info: dict, stock=None, kicad=False, symbol=None, foot
                     if not image_result:
                         cprint('[TREE]\tWarning: Failed to upload part image', silent=settings.SILENT)
         
-        if inventree_part['datasheet'] and settings.DATASHEET_UPLOAD:
-            if enable_upload:
-                # Upload datasheet
-                datasheet_link = inventree_api.upload_part_datasheet(
-                    datasheet_url=inventree_part['datasheet'],
-                    part_name=inventree_part['name'],
-                    part_pk=part_pk,
-                    supplier=inventree_part.get('supplier_name', ''),
+        # Only upload datasheet for new parts (skip for existing parts)
+        if new_part:
+            if inventree_part['datasheet'] and settings.DATASHEET_UPLOAD:
+                if enable_upload:
+                    # Upload datasheet
+                    datasheet_link = inventree_api.upload_part_datasheet(
+                        datasheet_url=inventree_part['datasheet'],
+                        part_name=inventree_part['name'],
+                        part_pk=part_pk,
+                        supplier=inventree_part.get('supplier_name', ''),
+                        silent=settings.SILENT,
+                    )
+                    if not datasheet_link:
+                        cprint('[TREE]\tWarning: Failed to upload part datasheet', silent=settings.SILENT)
+                    else:
+                        cprint('[TREE]\tSuccess: Uploaded part datasheet', silent=settings.SILENT)
+            elif settings.DATASHEET_UPLOAD:
+                cprint(
+                    f'[TREE]\tWarning: Datasheet upload skipped (missing URL) for supplier={inventree_part.get("supplier_name", "")}',
                     silent=settings.SILENT,
                 )
-                if not datasheet_link:
-                    cprint('[TREE]\tWarning: Failed to upload part datasheet', silent=settings.SILENT)
-                else:
-                    cprint('[TREE]\tSuccess: Uploaded part datasheet', silent=settings.SILENT)
-        elif settings.DATASHEET_UPLOAD:
-            cprint(
-                f'[TREE]\tWarning: Datasheet upload skipped (missing URL) for supplier={inventree_part.get("supplier_name", "")}',
-                silent=settings.SILENT,
-            )
 
         if kicad:
             try:
