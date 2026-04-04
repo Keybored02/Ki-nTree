@@ -161,7 +161,7 @@ def setup_environment(force=False) -> bool:
 
 def get_default_search_keys():
     return [
-        'product_description',
+        'manufacturer_product_number',
         'product_description',
         'revision',
         'keywords',
@@ -274,14 +274,19 @@ def fetch_part_info(part_number: str) -> dict:
             elif key == 'description':
                 description = part.get('description', {})
                 if isinstance(description, dict):
-                    product_name = description.get('product_description')
-                    detailed = description.get('detailed_description')
+                    product_name = part.get('name') or description.get('name') or description.get('product_name') or ''
+                    product_description = description.get('product_description') or description.get('detailed_description') or product_name
+                    detailed = description.get('detailed_description') or product_description
                 else:
                     product_name = str(description or '')
+                    product_description = product_name
                     detailed = ''
+                product_name = str(product_name or '')
+                product_description = str(product_description or product_name)
+                detailed = str(detailed or product_name)
                 part_info['product_name'] = product_name
-                part_info['product_description'] = product_name
-                part_info['detailed_description'] = detailed or product_name
+                part_info['product_description'] = product_description
+                part_info['detailed_description'] = detailed
             else:
                 value = part[key]
                 if key in {'datasheet_url', 'photo_url', 'product_url'}:
