@@ -1,0 +1,36 @@
+# Example configuration for bulk creating nested stock locations
+# 
+# This creates a hierarchy like:
+#   RACK-01/
+#     RACK-01/SHELF-01/
+#       RACK-01/SHELF-01/BOX-01
+#       RACK-01/SHELF-01/BOX-02
+#       ...
+#     RACK-01/SHELF-02/
+#       ...
+#   RACK-02/
+#     ...
+
+# Number of top-level racks to create
+racks: 3
+
+# Number of shelves per rack
+shelves_per_rack: 2
+
+# Number of boxes per shelf
+boxes_per_shelf: 4
+
+# Naming patterns for locations
+# Available variables:
+#   {i}    - auto-incrementing counter (1-indexed)
+#   {rack} - rack number
+#   {shelf} - shelf number
+naming_pattern:
+  rack: "RACK-{i:02d}"
+  shelf: "RACK-{rack}/SHELF-{i:02d}"
+  box: "RACK-{rack}/SHELF-{shelf}/BOX-{i:02d}"
+
+# Optional: parent location path
+# If specified, all racks will be created under this parent
+# Example: parent_path: "Electronics / Storage"
+# parent_path: ""
