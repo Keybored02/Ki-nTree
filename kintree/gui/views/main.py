@@ -1231,6 +1231,35 @@ class CreateView(MainView):
     fields = {
         'inventree_progress': ft.ProgressBar(height=32, width=420, value=0),
         'kicad_progress': ft.ProgressBar(height=32, width=420, value=0),
+        'bulk_progress': ft.ProgressBar(height=32, width=420, value=0),
+        'bulk_status': ft.Text(value='Bulk import idle', size=16),
+        'bulk_excel_path': ft.TextField(
+            label='Bulk Excel File',
+            width=440,
+            dense=True,
+            read_only=True,
+            hint_text='Columns: search_name, supplier, inventree_category',
+        ),
+        'bulk_excel_pick': ft.ElevatedButton(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.icons.UPLOAD_FILE),
+                    ft.Text('Select Excel', size=16),
+                ]
+            ),
+            height=GUI_PARAMS['button_height'],
+            width=GUI_PARAMS['button_width'] * 1.4,
+        ),
+        'bulk_import': ft.ElevatedButton(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.icons.PLAYLIST_ADD_CHECK_CIRCLE),
+                    ft.Text('Bulk Add From Excel', size=16),
+                ]
+            ),
+            height=GUI_PARAMS['button_height'],
+            width=GUI_PARAMS['button_width'] * 2.2,
+        ),
         'create': ft.ElevatedButton(
             content=ft.Row(
                 [
@@ -1259,6 +1288,226 @@ class CreateView(MainView):
     inventree_progress_row = None
     kicad_progress_row = None
     create_continue = True
+    bulk_picker = None
+
+    @staticmethod
+    def _normalize_header(value):
+        if value is None:
+            return ''
+        header = str(value).strip().lower()
+        for old, new in [('-', '_'), (' ', '_'), ('/', '_'), ('\\', '_')]:
+            header = header.replace(old, new)
+        return header
+
+    def _parse_bulk_excel_rows(self, file_path: str):
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(filename=file_path, data_only=True)
+        sheet = workbook.active
+
+        rows = list(sheet.iter_rows(values_only=True))
+        if not rows:
+            return [], ['Excel file is empty']
+
+        header = [self._normalize_header(cell) for cell in rows[0]]
+
+        search_aliases = {'search_name', 'name_to_search', 'search', 'part_number', 'supplier_part_number', 'mpn', 'name'}
+        supplier_aliases = {'supplier', 'supplier_name'}
+        category_aliases = {'inventree_category', 'category', 'category_tree'}
+
+        search_idx = next((i for i, h in enumerate(header) if h in search_aliases), None)
+        supplier_idx = next((i for i, h in enumerate(header) if h in supplier_aliases), None)
+        category_idx = next((i for i, h in enumerate(header) if h in category_aliases), None)
+
+        data_start_row = 1
+
+        # If headers are not found, fallback to 3-column mode:
+        # col A = search_name, col B = supplier, col C = inventree_category
+        if search_idx is None or supplier_idx is None or category_idx is None:
+            first_row = rows[0]
+            if len(first_row) >= 3 and any(cell is not None and str(cell).strip() for cell in first_row[:3]):
+                search_idx, supplier_idx, category_idx = 0, 1, 2
+                data_start_row = 0
+            else:
+                return [], [
+                    'Missing required columns. Expected headers: search_name, supplier, inventree_category',
+                    'Or provide 3 columns without headers in this order: search_name | supplier | inventree_category',
+                    f'Detected first row: {header}',
+                ]
+
+        parsed_rows = []
+        errors = []
+        for excel_row_index, row in enumerate(rows[data_start_row:], start=(data_start_row + 1)):
+            search_value = str(row[search_idx]).strip() if row[search_idx] is not None else ''
+            supplier_value = str(row[supplier_idx]).strip() if row[supplier_idx] is not None else ''
+            category_value = str(row[category_idx]).strip() if row[category_idx] is not None else ''
+
+            if not search_value and not supplier_value and not category_value:
+                continue
+
+            if not search_value or not supplier_value or not category_value:
+                errors.append(f'Row {excel_row_index}: missing one of required values')
+                continue
+
+            parsed_rows.append(
+                {
+                    'search_name': search_value,
+                    'supplier': supplier_value,
+                    'inventree_category': category_value,
+                    'excel_row': excel_row_index,
+                }
+            )
+
+        return parsed_rows, errors
+
+    def _on_bulk_dialog_result(self, e: ft.FilePickerResultEvent):
+        if e.files:
+            picked = e.files[0].path
+            self.fields['bulk_excel_path'].value = picked
+            self._page.update()
+
+    def _pick_bulk_excel(self, _):
+        if self._page.overlay:
+            self._page.overlay.pop()
+        self.bulk_picker = ft.FilePicker(on_result=self._on_bulk_dialog_result)
+        self._page.overlay.append(self.bulk_picker)
+        self._page.update()
+
+        initial_dir = settings.HOME_DIR
+        if self.fields['bulk_excel_path'].value:
+            initial_dir = os.path.dirname(self.fields['bulk_excel_path'].value)
+
+        self.bulk_picker.pick_files(
+            dialog_title='Select Excel for Bulk Add',
+            initial_directory=initial_dir,
+            allowed_extensions=['xlsx', 'xlsm', 'xltx', 'xltm'],
+            allow_multiple=False,
+        )
+
+    def _bulk_create_from_excel(self, _):
+        file_path = self.fields['bulk_excel_path'].value
+        if not file_path:
+            self.show_dialog(DialogType.ERROR, 'Select an Excel file first')
+            return
+
+        if not os.path.isfile(file_path):
+            self.show_dialog(DialogType.ERROR, f'Excel file not found: {file_path}')
+            return
+
+        try:
+            rows, parse_errors = self._parse_bulk_excel_rows(file_path)
+        except Exception as exc:
+            self.show_dialog(DialogType.ERROR, f'Failed to read Excel file: {exc}')
+            return
+
+        if not rows:
+            self.show_dialog(DialogType.ERROR, 'No valid rows found in Excel file')
+            return
+
+        if not inventree_interface.connect_to_server():
+            self.show_dialog(DialogType.ERROR, 'ERROR: Failed to connect to InvenTree server')
+            return
+
+        self.reset_progress_bars()
+        self.enable_create(False)
+
+        total = len(rows)
+        success = 0
+        failed = 0
+        failures = []
+
+        progress.reset_progress_bar(self.fields['bulk_progress'])
+        self.fields['bulk_status'].value = f'Preparing bulk import: 0/{total}'
+        self.fields['bulk_progress'].update()
+        self.fields['bulk_status'].update()
+
+        for idx, row in enumerate(rows, start=1):
+            if not self.create_continue:
+                self.enable_create(True)
+                return self.process_cancel()
+
+            cprint(
+                f"[BULK]\tProcessing row {idx}/{total} | search='{row['search_name']}' | supplier='{row['supplier']}'",
+                silent=settings.SILENT,
+            )
+
+            supplier_name = inventree_interface.get_supplier_name(row['supplier'])
+            if supplier_name not in settings.CONFIG_SUPPLIERS:
+                for key, value in settings.CONFIG_SUPPLIERS.items():
+                    display_name = str(value.get('name', '')).strip().lower()
+                    if row['supplier'].strip().lower() in {key.strip().lower(), display_name}:
+                        supplier_name = key
+                        break
+
+            supplier_data = inventree_interface.supplier_search(
+                supplier=supplier_name,
+                part_number=row['search_name'],
+            )
+            if not supplier_data:
+                failed += 1
+                failures.append(f"Row {row['excel_row']}: supplier search failed for '{row['search_name']}'")
+                continue
+
+            part_form = inventree_interface.translate_supplier_to_form(
+                supplier=supplier_name,
+                part_info=supplier_data,
+            )
+
+            if not part_form.get('name'):
+                part_form['name'] = row['search_name']
+            if not part_form.get('description'):
+                part_form['description'] = row['search_name']
+
+            part_form['category_tree'] = [
+                segment.strip()
+                for segment in inventree_interface.split_category_tree(row['inventree_category'])
+                if str(segment).strip()
+            ]
+
+            new_part, part_pk, _ = inventree_interface.inventree_create(
+                part_info=part_form,
+                kicad=False,
+                show_progress=False,
+                is_custom=False,
+            )
+
+            if part_pk:
+                success += 1
+                cprint(
+                    f"[BULK]\tRow {row['excel_row']} created successfully (part_pk={part_pk})",
+                    silent=settings.SILENT,
+                )
+            else:
+                failed += 1
+                failures.append(
+                    f"Row {row['excel_row']}: failed to create '{row['search_name']}' in category '{row['inventree_category']}'"
+                )
+
+            self.fields['bulk_progress'].value = idx / total
+            self.fields['bulk_status'].value = f'Processing row {idx}/{total} | success={success} failed={failed}'
+            self.fields['bulk_progress'].update()
+            self.fields['bulk_status'].update()
+
+        self.fields['bulk_progress'].value = 1.0
+        self.fields['bulk_status'].value = f'Bulk import complete: success={success} failed={failed}'
+        self.fields['bulk_progress'].update()
+        self.fields['bulk_status'].update()
+
+        cprint(
+            f"[BULK]\tCompleted all rows | success={success} failed={failed}",
+            silent=settings.SILENT,
+        )
+
+        self.enable_create(True)
+
+        all_errors = parse_errors + failures
+        if all_errors:
+            self.show_dialog(
+                DialogType.WARNING,
+                f'Bulk import completed. Success: {success}, Failed: {failed}. First errors: {all_errors[:3]}',
+            )
+        else:
+            self.show_dialog(DialogType.VALID, f'Bulk import completed. Created {success} parts successfully')
 
     def show_dialog(self, type: DialogType, message: str):
         if 'create' in self.fields:
@@ -1599,10 +1848,38 @@ class CreateView(MainView):
         # Update callbacks
         self.fields['create'].on_click = self.create_part
         self.fields['cancel'].on_click = self.cancel
+        self.fields['bulk_excel_pick'].on_click = self._pick_bulk_excel
+        self.fields['bulk_import'].on_click = self._bulk_create_from_excel
 
         self.column = ft.Column(
             controls=[
                 ft.Row(),
+                ft.Row(
+                    controls=[
+                        ft.Text('Bulk Progress', size=16, weight=ft.FontWeight.BOLD, width=140),
+                        self.fields['bulk_progress'],
+                        self.fields['bulk_status'],
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    width=900,
+                ),
+                ft.Row(height=10),
+                ft.Row(
+                    controls=[
+                        self.fields['bulk_excel_path'],
+                        self.fields['bulk_excel_pick'],
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    width=700,
+                ),
+                ft.Row(
+                    controls=[
+                        self.fields['bulk_import'],
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    width=700,
+                ),
+                ft.Row(height=10),
                 ft.Row(
                     controls=[
                         self.fields['create'],

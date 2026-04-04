@@ -782,11 +782,14 @@ def inventree_create(part_info: dict, stock=None, kicad=False, symbol=None, foot
                     cprint('[INFO]\tSuccess: Added new supplier part', silent=settings.SILENT)
             
             if supplier_part and settings.PRICING_UPLOAD:
-                cprint('\n[MAIN]\tProcessing Price Breaks', silent=settings.SILENT)
-                inventree_api.update_price_breaks(
-                    supplier_part=supplier_part,
-                    price_breaks=inventree_part['pricing'],
-                    currency=inventree_part['currency'])
+                if inventree_part.get('pricing'):
+                    cprint('\n[MAIN]\tProcessing Price Breaks', silent=settings.SILENT)
+                    inventree_api.update_price_breaks(
+                        supplier_part=supplier_part,
+                        price_breaks=inventree_part['pricing'],
+                        currency=inventree_part['currency'])
+                else:
+                    cprint('[TREE]\tInfo: No price breaks for this part, skipping.', silent=settings.SILENT)
 
         if stock is not None:
             stock['part'] = part_pk
@@ -948,12 +951,15 @@ def inventree_create_alternate(part_info: dict, part_id='', part_ipn='', show_pr
                 result = True
 
         if supplier_part and settings.PRICING_UPLOAD:
-            cprint('\n[MAIN]\tProcessing Price Breaks', silent=settings.SILENT)
-            inventree_api.update_price_breaks(
-                supplier_part=supplier_part,
-                price_breaks=inventree_part['pricing'],
-                currency=inventree_part['currency'])
-            result = True
+            if inventree_part.get('pricing'):
+                cprint('\n[MAIN]\tProcessing Price Breaks', silent=settings.SILENT)
+                inventree_api.update_price_breaks(
+                    supplier_part=supplier_part,
+                    price_breaks=inventree_part['pricing'],
+                    currency=inventree_part['currency'])
+                result = True
+            else:
+                cprint('[TREE]\tInfo: No price breaks for this part, skipping.', silent=settings.SILENT)
     
     else:
         cprint('[INFO]\tWarning: No supplier part to create', silent=settings.SILENT)

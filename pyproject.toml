@@ -26,6 +26,7 @@ validators = "^0.34.0"
 wrapt_timeout_decorator = "^1.5.1"
 cloudscraper = "^1.2.71"
 playwright = "^1.51.0"
+openpyxl = "^3.1.5"
 
 [tool.poetry.dev-dependencies]
 invoke = "^2.0.0"

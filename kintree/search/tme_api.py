@@ -6,6 +6,7 @@ import os
 import urllib.parse
 import urllib.request
 import json
+import re
 
 # from ..common.tools import download
 from ..config import config_interface, settings
@@ -99,7 +100,7 @@ def tme_api_query(request: urllib.request.Request) -> dict:
     return response
 
 
-def fetch_part_info(part_number: str) -> dict:
+def fetch_part_info(part_number: str, resolve_linked_documents: bool = False) -> dict:
     def normalize_symbol(symbol: str) -> str:
         return str(symbol or '').strip().upper()
 
@@ -122,6 +123,35 @@ def fetch_part_info(part_number: str) -> dict:
             return file_url
         return f'https://www.tme.eu{file_url}'
 
+    def resolve_linked_document_url(document_url: str) -> str:
+        """Resolve TME LNK text files to the actual target URL they contain."""
+        document_url = normalize_file_url(document_url)
+        if not document_url:
+            return ''
+
+        if not document_url.lower().endswith('.txt'):
+            return document_url
+
+        try:
+            request = urllib.request.Request(
+                document_url,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    'Accept': 'text/plain,*/*;q=0.8',
+                    'Referer': 'https://www.tme.eu/',
+                },
+            )
+            with urllib.request.urlopen(request, timeout=15) as response:
+                body = response.read().decode('utf-8', errors='replace').strip()
+        except Exception:
+            return document_url
+
+        match = re.search(r'https?://\S+', body)
+        if match:
+            return match.group(0).rstrip('\r\n')
+
+        return document_url
+
     def fetch_datasheet_from_product_files() -> str:
         params = {'SymbolList[0]': part_number}
         files_response = tme_api_query(tme_api_request('/Products/GetProductsFiles', tme_api_settings, params))
@@ -131,24 +161,45 @@ def fetch_part_info(part_number: str) -> dict:
 
         found_files, files_index = search_product(files_response)
         if not found_files:
-            return ''
+            product_list = files_response.get('Data', {}).get('ProductList', [])
+            if len(product_list) == 1:
+                files_index = 0
+            else:
+                return ''
 
         files_data = files_response['Data']['ProductList'][files_index].get('Files', {})
-        document_list = files_data.get('DocumentList', [])
+        document_list = files_data.get('DocumentList', []) or files_data.get('Documents', []) or []
         if not document_list:
             return ''
 
         # Prefer explicit documentation first, then accept any PDF.
-        preferred_order = ['DTE', 'INS', 'KCH', 'GWA']
+        preferred_order = ['DTE', 'DATASHEET', 'DS', 'PDF', 'INS', 'KCH', 'GWA']
         for doc_type in preferred_order:
             for doc in document_list:
-                if doc.get('DocumentType') == doc_type:
-                    document_url = normalize_file_url(doc.get('DocumentUrl', ''))
-                    return document_url
+                document_type = str(doc.get('DocumentType', '') or doc.get('Type', '')).upper()
+                document_name = str(doc.get('DocumentName', '') or doc.get('Name', '') or doc.get('Title', '')).lower()
+                document_url = normalize_file_url(
+                    doc.get('DocumentUrl', '')
+                    or doc.get('Url', '')
+                    or doc.get('Link', '')
+                )
+                if document_type == doc_type or doc_type.lower() in document_name or doc_type.lower() in document_url.lower():
+                    return resolve_linked_document_url(document_url) if resolve_linked_documents else document_url
 
         for doc in document_list:
-            document_url = normalize_file_url(doc.get('DocumentUrl', ''))
+            document_url = normalize_file_url(
+                doc.get('DocumentUrl', '')
+                or doc.get('Url', '')
+                or doc.get('Link', '')
+            )
             if document_url.lower().endswith('.pdf'):
+                return resolve_linked_document_url(document_url) if resolve_linked_documents else document_url
+
+            if document_url.lower().endswith('.txt'):
+                if resolve_linked_documents:
+                    resolved_url = resolve_linked_document_url(document_url)
+                    if resolved_url and resolved_url != document_url:
+                        return resolved_url
                 return document_url
 
         return ''
@@ -207,6 +258,8 @@ def fetch_part_info(part_number: str) -> dict:
     datasheet_url = fetch_datasheet_from_product_files()
     if datasheet_url:
         part_info['Datasheet'] = datasheet_url
+    else:
+        part_info['Datasheet'] = part_info.get('Datasheet', '')
 
     return part_info
 
