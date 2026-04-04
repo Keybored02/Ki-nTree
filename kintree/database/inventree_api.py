@@ -4,6 +4,7 @@ from ..common import part_tools
 from ..common.tools import cprint, download_with_retry, validate_downloaded_file
 from ..config import config_interface
 import re
+import requests
 
 # Required to use local CA certificates on Linux
 # For more details, refer to https://github.com/sparkmicro/Ki-nTree/pull/45
@@ -577,6 +578,56 @@ def set_part_default_location(part_pk: int, location_pk: int):
     part.save(data={
         "default_location": location_pk,
     })
+
+
+def link_barcode(barcode: str, part_pk: int = None, stocklocation_pk: int = None) -> bool:
+    """Link a barcode to an InvenTree object via /api/barcode/link/."""
+    global inventree_api
+
+    payload = {
+        'barcode': str(barcode or '').strip(),
+    }
+
+    if not payload['barcode']:
+        return False
+
+    if part_pk:
+        payload['part'] = int(part_pk)
+    if stocklocation_pk:
+        payload['stocklocation'] = int(stocklocation_pk)
+
+    if len(payload.keys()) == 1:
+        cprint('[TREE]\tWarning: No barcode target provided', silent=settings.SILENT)
+        return False
+
+    token = getattr(inventree_api, 'token', None)
+    base_url = getattr(inventree_api, 'base_url', '')
+
+    if not token or not base_url:
+        cprint('[TREE]\tWarning: Missing API token/base URL for barcode link', silent=settings.SILENT)
+        return False
+
+    headers = {
+        'Authorization': f'Token {token}',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+    }
+
+    endpoint = f"{base_url.rstrip('/')}/api/barcode/link/"
+
+    try:
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=20)
+        if response.status_code in [200, 201]:
+            return True
+
+        cprint(
+            f"[TREE]\tWarning: Barcode link failed (status={response.status_code})",
+            silent=settings.SILENT,
+        )
+        return False
+    except Exception as exc:
+        cprint(f'[TREE]\tWarning: Barcode link request failed: {repr(exc)}', silent=settings.SILENT)
+        return False
 
 
 def update_part(pk: int, data: dict) -> int:

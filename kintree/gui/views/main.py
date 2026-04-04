@@ -603,6 +603,12 @@ class InventreeView(MainView):
             dense=GUI_PARAMS['textfield_dense'],
             options=[],
         ),
+        'Part barcode': ft.TextField(
+            label='Part Barcode (optional)',
+            disabled=not settings.ENABLE_INVENTREE,
+            width=GUI_PARAMS['textfield_width'],
+            dense=GUI_PARAMS['textfield_dense'],
+        ),
         'Stock quantity': ft.TextField(
             label='Stock Quantity',
             disabled=not settings.ENABLE_INVENTREE,
@@ -839,12 +845,12 @@ class InventreeView(MainView):
         self.fields['Update Parameter'].on_change = self.process_update
         # Create stock location
         self.fields['Stock location'].options = self.get_stock_location_options()
-        self.fields['Stock location'].on_change = self.process_location
-        self.fields["Create stock"].on_change = self.process_create_stock
         self.fields['Stock location'].on_change = self.push_data
+        self.fields['load_stock_locations'].on_click = self.reload_stock_locations
+        self.fields['Part barcode'].on_change = self.push_data
+        self.fields["Create stock"].on_change = self.process_create_stock
         self.fields['Stock quantity'].on_change = self.push_data
         self.fields['Make stock location default'].on_change = self.push_data
-        self.fields['load_stock_locations'].on_click = self.reload_stock_locations
 
         self.column = ft.Column(
             controls=[
@@ -908,18 +914,29 @@ class InventreeView(MainView):
                     controls=[
                         ft.Row(
                             controls=[
-                                self.fields['Create stock'],
-                                self.fields['load_stock_locations']
+                                self.fields['Create stock']
                             ]
                         )
                     ]
                 ),
+                ft.Row(
+                    controls=[
+                        self.fields['Stock location'],
+                    ],
+                ),
+                ft.Row(
+                    controls=[
+                        self.fields['load_stock_locations'],
+                    ],
+                ),
+                ft.Row(
+                    controls=[
+                        self.fields['Part barcode'],
+                    ],
+                ),
                 ft.Column(
                     ref=self.create_stock_widgets_ref,
                     controls=[
-                        ft.Row(
-                            controls=[self.fields['Stock location']],
-                        ),
                         ft.Row(
                             controls=[self.fields['Stock quantity']],
                         ),
@@ -1238,7 +1255,7 @@ class CreateView(MainView):
             width=440,
             dense=True,
             read_only=True,
-            hint_text='Columns: search_name, supplier, inventree_category',
+            hint_text='Columns: search_name, supplier, inventree_category, [location], [barcode], [ipn], [create_stock], [stock_quantity], [make_default]',
         ),
         'bulk_excel_pick': ft.ElevatedButton(
             content=ft.Row(
@@ -1299,6 +1316,69 @@ class CreateView(MainView):
             header = header.replace(old, new)
         return header
 
+    @staticmethod
+    def _resolve_bulk_supplier_key(supplier_value: str):
+        supplier_name = inventree_interface.get_supplier_name(supplier_value)
+        if supplier_name in settings.CONFIG_SUPPLIERS:
+            return supplier_name
+
+        needle = str(supplier_value or '').strip().lower()
+        for key, value in settings.CONFIG_SUPPLIERS.items():
+            display_name = str(value.get('name', '')).strip().lower()
+            if needle in {key.strip().lower(), display_name}:
+                return key
+        return None
+
+    @staticmethod
+    def _normalize_location_tree(location_value):
+        if not location_value:
+            return None
+
+        if isinstance(location_value, list):
+            tree = [str(segment).strip() for segment in location_value if str(segment).strip()]
+            return tree or None
+
+        text = str(location_value).strip()
+        if not text:
+            return None
+
+        tree = [
+            segment.strip()
+            for segment in inventree_interface.split_category_tree(text)
+            if str(segment).strip()
+        ]
+        return tree or None
+
+    @staticmethod
+    def _post_process_part(part_pk: int, location_tree=None, create_stock_enabled: bool = False, barcode_value: str = ''):
+        if not part_pk:
+            return
+
+        if location_tree and not create_stock_enabled:
+            inventree_interface.inventree_set_part_default_location(part_pk, location_tree)
+
+        barcode = str(barcode_value or '').strip()
+        if barcode:
+            inventree_interface.inventree_link_part_barcode(part_pk, barcode)
+
+    @staticmethod
+    def _parse_optional_bool(value):
+        if value is None:
+            return True, None
+
+        text = str(value).strip().lower()
+        if text == '':
+            return True, None
+
+        true_values = {'1', 'true', 'yes', 'y', 'on'}
+        false_values = {'0', 'false', 'no', 'n', 'off'}
+
+        if text in true_values:
+            return True, True
+        if text in false_values:
+            return True, False
+        return False, None
+
     def _parse_bulk_excel_rows(self, file_path: str):
         try:
             load_workbook = import_module('openpyxl').load_workbook
@@ -1317,10 +1397,22 @@ class CreateView(MainView):
         search_aliases = {'search_name', 'name_to_search', 'search', 'part_number', 'supplier_part_number', 'mpn', 'name'}
         supplier_aliases = {'supplier', 'supplier_name'}
         category_aliases = {'inventree_category', 'category', 'category_tree'}
+        location_aliases = {'location', 'stock_location', 'inventree_location'}
+        barcode_aliases = {'barcode', 'part_barcode'}
+        ipn_aliases = {'ipn', 'ipn_code', 'category_code', 'ipn_category_code'}
+        create_stock_aliases = {'create_stock', 'stock', 'add_stock'}
+        stock_quantity_aliases = {'stock_quantity', 'quantity', 'qty'}
+        make_default_aliases = {'make_default', 'stock_make_default', 'make_stock_location_default'}
 
         search_idx = next((i for i, h in enumerate(header) if h in search_aliases), None)
         supplier_idx = next((i for i, h in enumerate(header) if h in supplier_aliases), None)
         category_idx = next((i for i, h in enumerate(header) if h in category_aliases), None)
+        location_idx = next((i for i, h in enumerate(header) if h in location_aliases), None)
+        barcode_idx = next((i for i, h in enumerate(header) if h in barcode_aliases), None)
+        ipn_idx = next((i for i, h in enumerate(header) if h in ipn_aliases), None)
+        create_stock_idx = next((i for i, h in enumerate(header) if h in create_stock_aliases), None)
+        stock_quantity_idx = next((i for i, h in enumerate(header) if h in stock_quantity_aliases), None)
+        make_default_idx = next((i for i, h in enumerate(header) if h in make_default_aliases), None)
 
         data_start_row = 1
 
@@ -1330,20 +1422,42 @@ class CreateView(MainView):
             first_row = rows[0]
             if len(first_row) >= 3 and any(cell is not None and str(cell).strip() for cell in first_row[:3]):
                 search_idx, supplier_idx, category_idx = 0, 1, 2
+                location_idx = 3 if len(first_row) >= 4 else None
+                barcode_idx = 4 if len(first_row) >= 5 else None
+                ipn_idx = 5 if len(first_row) >= 6 else None
+                create_stock_idx = 6 if len(first_row) >= 7 else None
+                stock_quantity_idx = 7 if len(first_row) >= 8 else None
+                make_default_idx = 8 if len(first_row) >= 9 else None
                 data_start_row = 0
             else:
                 return [], [
                     'Missing required columns. Expected headers: search_name, supplier, inventree_category',
-                    'Or provide 3 columns without headers in this order: search_name | supplier | inventree_category',
+                    'Optional columns: location, barcode, ipn, create_stock, stock_quantity, make_default',
+                    'Or provide 3-9 columns without headers in this order: search_name | supplier | inventree_category | [location] | [barcode] | [ipn] | [create_stock] | [stock_quantity] | [make_default]',
                     f'Detected first row: {header}',
                 ]
 
         parsed_rows = []
         errors = []
+
+        def value_at(row_data, index):
+            if index is None:
+                return ''
+            if index >= len(row_data):
+                return ''
+            cell = row_data[index]
+            return str(cell).strip() if cell is not None else ''
+
         for excel_row_index, row in enumerate(rows[data_start_row:], start=(data_start_row + 1)):
-            search_value = str(row[search_idx]).strip() if row[search_idx] is not None else ''
-            supplier_value = str(row[supplier_idx]).strip() if row[supplier_idx] is not None else ''
-            category_value = str(row[category_idx]).strip() if row[category_idx] is not None else ''
+            search_value = value_at(row, search_idx)
+            supplier_value = value_at(row, supplier_idx)
+            category_value = value_at(row, category_idx)
+            location_value = value_at(row, location_idx)
+            barcode_value = value_at(row, barcode_idx)
+            ipn_value = value_at(row, ipn_idx)
+            create_stock_raw = value_at(row, create_stock_idx)
+            stock_quantity_value = value_at(row, stock_quantity_idx)
+            make_default_raw = value_at(row, make_default_idx)
 
             if not search_value and not supplier_value and not category_value:
                 continue
@@ -1352,11 +1466,27 @@ class CreateView(MainView):
                 errors.append(f'Row {excel_row_index}: missing one of required values')
                 continue
 
+            ok_create_stock, create_stock_value = self._parse_optional_bool(create_stock_raw)
+            if not ok_create_stock:
+                errors.append(f"Row {excel_row_index}: invalid create_stock value '{create_stock_raw}'")
+                continue
+
+            ok_make_default, make_default_value = self._parse_optional_bool(make_default_raw)
+            if not ok_make_default:
+                errors.append(f"Row {excel_row_index}: invalid make_default value '{make_default_raw}'")
+                continue
+
             parsed_rows.append(
                 {
                     'search_name': search_value,
                     'supplier': supplier_value,
                     'inventree_category': category_value,
+                    'location': location_value,
+                    'barcode': barcode_value,
+                    'ipn': ipn_value,
+                    'create_stock': create_stock_value,
+                    'stock_quantity': stock_quantity_value,
+                    'make_default': make_default_value,
                     'excel_row': excel_row_index,
                 }
             )
@@ -1418,11 +1548,19 @@ class CreateView(MainView):
         success = 0
         failed = 0
         failures = []
+        inv_data = data_from_views.get('InvenTree', {})
 
         progress.reset_progress_bar(self.fields['inventree_progress'])
         self.fields['bulk_status'].value = f'Preparing bulk import: 0/{total}'
         self.fields['inventree_progress'].update()
         self.fields['bulk_status'].update()
+
+        category_codes_cfg = config_interface.load_file(settings.CONFIG_CATEGORIES).get('CODES', {})
+        existing_category_codes = {
+            str(code).strip()
+            for code in category_codes_cfg.values()
+            if str(code).strip()
+        }
 
         for idx, row in enumerate(rows, start=1):
             if not self.create_continue:
@@ -1434,13 +1572,11 @@ class CreateView(MainView):
                 silent=settings.SILENT,
             )
 
-            supplier_name = inventree_interface.get_supplier_name(row['supplier'])
-            if supplier_name not in settings.CONFIG_SUPPLIERS:
-                for key, value in settings.CONFIG_SUPPLIERS.items():
-                    display_name = str(value.get('name', '')).strip().lower()
-                    if row['supplier'].strip().lower() in {key.strip().lower(), display_name}:
-                        supplier_name = key
-                        break
+            supplier_name = self._resolve_bulk_supplier_key(row['supplier'])
+            if not supplier_name:
+                failed += 1
+                failures.append(f"Row {row['excel_row']}: unknown supplier '{row['supplier']}'")
+                continue
 
             supplier_data = inventree_interface.supplier_search(
                 supplier=supplier_name,
@@ -1467,14 +1603,81 @@ class CreateView(MainView):
                 if str(segment).strip()
             ]
 
+            if settings.CONFIG_IPN.get('IPN_CATEGORY_CODE', False):
+                ipn_code = str(row.get('ipn', '') or '').strip()
+                if ipn_code:
+                    part_form['category_code'] = ipn_code
+                    if ipn_code in existing_category_codes:
+                        cprint(f"[BULK]\tRow {row['excel_row']}: using existing category code '{ipn_code}'", silent=settings.SILENT)
+                    else:
+                        cprint(f"[BULK]\tRow {row['excel_row']}: using new category code '{ipn_code}'", silent=settings.SILENT)
+                else:
+                    if inv_data.get('Create New Code', False):
+                        part_form['category_code'] = inv_data.get('New Category Code', '')
+                    else:
+                        part_form['category_code'] = inv_data.get('IPN: Category Code', '')
+
+            location_text = str(row.get('location', '') or '').strip()
+            if not location_text:
+                location_text = inv_data.get('Stock location', '')
+
+            location_tree = self._normalize_location_tree(location_text)
+
+            create_stock_enabled = bool(inv_data.get('Create stock', False))
+            if row.get('create_stock') is not None:
+                create_stock_enabled = bool(row.get('create_stock'))
+
+            stock_quantity = str(row.get('stock_quantity', '') or '').strip()
+            if not stock_quantity:
+                stock_quantity = inv_data.get('Stock quantity', '1')
+
+            make_default = inv_data.get('Make stock location default', False)
+            if row.get('make_default') is not None:
+                make_default = bool(row.get('make_default'))
+
+            stock_payload = None
+            if create_stock_enabled and not location_tree:
+                failed += 1
+                failures.append(
+                    f"Row {row['excel_row']}: create_stock is enabled but no stock location provided"
+                )
+                continue
+
+            if create_stock_enabled and location_tree:
+                location_pk = inventree_interface.get_inventree_stock_location_id(location_tree)
+                if location_pk <= 0:
+                    failed += 1
+                    failures.append(
+                        f"Row {row['excel_row']}: stock location not found '{row.get('location') or inv_data.get('Stock location', '')}'"
+                    )
+                    continue
+
+                stock_payload = {
+                    'location': location_pk,
+                    'quantity': stock_quantity,
+                    'make_default': make_default,
+                }
+
             new_part, part_pk, _ = inventree_interface.inventree_create(
                 part_info=part_form,
                 kicad=False,
                 show_progress=False,
                 is_custom=False,
+                stock=stock_payload,
             )
 
             if part_pk:
+                barcode_value = str(row.get('barcode', '') or '').strip()
+                if not barcode_value:
+                    barcode_value = str(inv_data.get('Part barcode', '') or '').strip()
+
+                self._post_process_part(
+                    part_pk=part_pk,
+                    location_tree=location_tree,
+                    create_stock_enabled=create_stock_enabled,
+                    barcode_value=barcode_value,
+                )
+
                 success += 1
                 cprint(
                     f"[BULK]\tRow {row['excel_row']} created successfully (part_pk={part_pk})",
@@ -1511,9 +1714,13 @@ class CreateView(MainView):
 
         all_errors = parse_errors + failures
         if all_errors:
+            preview = '\n'.join([f'- {err}' for err in all_errors[:5]])
+            remaining = max(0, len(all_errors) - 5)
+            if remaining:
+                preview += f'\n- ... and {remaining} more'
             self.show_dialog(
                 DialogType.WARNING,
-                f'Bulk import completed. Success: {success}, Failed: {failed}. First errors: {all_errors[:3]}',
+                f'Bulk import completed. Success: {success}, Failed: {failed}.\nErrors:\n{preview}',
             )
         else:
             self.show_dialog(DialogType.VALID, f'Bulk import completed. Created {success} parts successfully')
@@ -1738,6 +1945,15 @@ class CreateView(MainView):
                 self.fields['inventree_progress'].value = progress.MAX_PROGRESS
             else:
                 if part_pk:
+                    location_tree = data_from_views['InvenTree'].get('Stock location', None)
+                    barcode = str(data_from_views['InvenTree'].get('Part barcode', '') or '').strip()
+                    self._post_process_part(
+                        part_pk=part_pk,
+                        location_tree=location_tree,
+                        create_stock_enabled=bool(data_from_views['InvenTree'].get('Create stock')),
+                        barcode_value=barcode,
+                    )
+
                     # Update symbol
                     if symbol:
                         symbol = f'{symbol.split(":")[0]}:{part_info["IPN"]}'

@@ -565,6 +565,21 @@ def get_inventree_stock_location_id(stock_location_tree: list):
     return inventree_api.get_inventree_stock_location_id(stock_location_tree)
 
 
+def inventree_set_part_default_location(part_pk: int, stock_location_tree: list) -> bool:
+    try:
+        location_pk = inventree_api.get_inventree_stock_location_id(stock_location_tree)
+        if location_pk <= 0:
+            return False
+        inventree_api.set_part_default_location(part_pk, location_pk)
+        return True
+    except Exception:
+        return False
+
+
+def inventree_link_part_barcode(part_pk: int, barcode: str) -> bool:
+    return inventree_api.link_barcode(barcode=barcode, part_pk=part_pk)
+
+
 def inventree_create(part_info: dict, stock=None, kicad=False, symbol=None, footprint=None, show_progress=True, is_custom=False, enable_upload=True):
     ''' Create InvenTree part from supplier part data and categories '''
 
