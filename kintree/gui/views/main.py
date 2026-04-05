@@ -148,6 +148,11 @@ class MainView(CommonView):
                         on_click=self.call_settings,
                     ),
                     ft.IconButton(
+                        ft.icons.FULLSCREEN,
+                        tooltip='Fit to screen / restore',
+                        on_click=self.toggle_fit_to_screen,
+                    ),
+                    ft.IconButton(
                         ft.icons.CLOSE,
                         on_click=lambda _: page.window.close(),
                     ),
@@ -177,6 +182,17 @@ class MainView(CommonView):
     def call_settings(self, e):
         handle_transition(self._page, transition=True)
         self._page.go('/settings')
+
+    def toggle_fit_to_screen(self, e):
+        window = self._page.window
+        current = bool(getattr(window, 'maximized', False))
+        window.maximized = not current
+        try:
+            e.control.icon = ft.icons.FULLSCREEN_EXIT if not current else ft.icons.FULLSCREEN
+            e.control.update()
+        except Exception:
+            pass
+        self._page.update()
 
     def reset_view(self, e, ignore=['enable'], hidden={}):
         def reset_field(field):

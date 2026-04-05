@@ -22,13 +22,16 @@ from .views.settings import (
 def init_gui(page: ft.Page):
     '''Initialize page'''
     # Alignments
-    page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
-    page.vertical_alignment = ft.MainAxisAlignment.CENTER
-    page.scroll = ft.ScrollMode.ALWAYS
+    page.horizontal_alignment = ft.CrossAxisAlignment.STRETCH
+    page.vertical_alignment = ft.MainAxisAlignment.START
+    page.scroll = ft.ScrollMode.AUTO
+    page.padding = 0
 
     # Window Icon
     page.window.icon = os.path.join(settings.PROJECT_DIR, 'gui', 'logo.ico')
     page.window.title_bar_hidden = True
+    page.window.maximizable = True
+    page.window.resizable = True
     
     # Theme
     update_theme(page)
