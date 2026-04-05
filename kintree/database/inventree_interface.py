@@ -1,4 +1,5 @@
 import copy
+import re
 import time
 
 from ..config import settings
@@ -593,6 +594,54 @@ def inventree_create_supplier_part(part) -> bool:
 
 def get_inventree_stock_location_id(stock_location_tree: list):
     return inventree_api.get_inventree_stock_location_id(stock_location_tree)
+
+
+def resolve_stock_location_pk(location, stock_location_id_map: dict | None = None) -> int:
+    start_ts = time.perf_counter()
+
+    def _finish(result_pk: int, source: str, lookup: str = '') -> int:
+        elapsed_ms = (time.perf_counter() - start_ts) * 1000.0
+        lookup_text = lookup if lookup else str(location)
+        cprint(f'[TREE]\tStock location resolve ({source}) {lookup_text} -> pk={result_pk} ({elapsed_ms:.1f} ms)', silent=False)
+        return result_pk
+
+    if location is None:
+        return _finish(-1, 'empty')
+
+    if isinstance(location, int):
+        return _finish(location if location > 0 else -1, 'direct-int')
+
+    location_text = str(location).strip()
+    if not location_text:
+        return _finish(-1, 'empty')
+
+    try:
+        direct_pk = int(location_text)
+        if direct_pk > 0:
+            return _finish(direct_pk, 'direct-str-int')
+    except ValueError:
+        pass
+
+    normalized_location = '/'.join(
+        part.strip()
+        for part in re.sub(r'^-+\s+', '', location_text).split('/')
+        if part.strip()
+    )
+    if not normalized_location:
+        return _finish(-1, 'normalized-empty', location_text)
+
+    if stock_location_id_map:
+        cached_pk = int(stock_location_id_map.get(normalized_location) or 0)
+        if cached_pk > 0:
+            return _finish(cached_pk, 'cache', normalized_location)
+
+    stock_location_tree = split_category_tree(normalized_location)
+    resolved_pk = int(get_inventree_stock_location_id(stock_location_tree) or -1)
+    return _finish(resolved_pk, 'api', normalized_location)
+
+
+def get_stock_location_id_map() -> dict:
+    return inventree_api.get_stock_location_id_map()
 
 
 def inventree_set_part_default_location(part_pk: int, stock_location_tree: list) -> bool:

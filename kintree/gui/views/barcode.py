@@ -10,6 +10,7 @@ Supports: TME (key-value), Mouser (GS1-128), Digi-Key (GS1-128) barcodes.
 import flet as ft
 import threading
 import requests
+import re
 import time
 from typing import Dict, List, Optional
 
@@ -129,6 +130,8 @@ class BarcodeImportView(MainView):
         self.scanned_rows: List[BarcodeScannedRow] = []
         self.categories = {}
         self.stock_locations = {}
+        self.stock_location_id_map = {}
+        self._location_pk_to_path_cache: Dict[int, str] = {}
         self._last_scan_code = ''
         self._last_scan_ts = 0.0
         self._recent_scan_codes: Dict[str, float] = {}
@@ -596,8 +599,15 @@ class BarcodeImportView(MainView):
     
     def _on_location_changed(self, *args, **kwargs):
         """Apply selected location to all items."""
-        location = self.fields['location_select'].value
-        if location:
+        location_value = self.fields['location_select'].value
+        if location_value:
+            location = str(location_value)
+            try:
+                cache = getattr(self, '_location_pk_to_path_cache', None)
+                if isinstance(cache, dict):
+                    location = cache.get(int(location_value), location)
+            except (ValueError, TypeError):
+                pass
             for row in self.scanned_rows:
                 row.location = location
             self._update_results_table()
@@ -623,6 +633,21 @@ class BarcodeImportView(MainView):
             self.fields['status_message'].update()
         except AssertionError:
             pass
+
+    def _normalize_stock_location_value(self, location: str) -> str:
+        return '/'.join(
+            part.strip()
+            for part in re.sub(r'^-+\s+', '', str(location or '').strip()).split('/')
+            if part.strip()
+        )
+
+    def _get_stock_location_pk(self, location: str) -> int:
+        location_pk = inventree_interface.resolve_stock_location_pk(location, self.stock_location_id_map)
+        if location_pk > 0:
+            cprint(f'[BARCODE]\tResolved stock location: {location} -> pk={location_pk}', silent=False)
+        else:
+            cprint(f'[BARCODE]\tStock location cache miss: {location}', silent=False)
+        return location_pk
 
     def _connect_server_with_retries(self, attempts: int = 3, delay_seconds: float = 1.5) -> bool:
         """Try connecting to InvenTree multiple times before failing."""
@@ -748,9 +773,7 @@ class BarcodeImportView(MainView):
                 # Prepare stock payload
                 stock_payload = None
                 if row.create_stock:
-                    location_pk = inventree_interface.get_inventree_stock_location_id(
-                        [row.location]
-                    )
+                    location_pk = self._get_stock_location_pk(row.location)
                     if location_pk <= 0:
                         failed += 1
                         failures.append(f'{row.search_name}: Location not found')
@@ -821,7 +844,7 @@ class BarcodeImportView(MainView):
                 summary += f'\n  ... and {len(failures) - 5} more'
         
         if failed == 0:
-            dlg_type = DialogType.SUCCESS
+            dlg_type = DialogType.VALID
             # Clear and reset
             self.scanned_rows.clear()
             self._update_results_table()
@@ -870,6 +893,8 @@ class BarcodeAssignmentView(MainView):
         self._http = requests.Session()
         self._part_lookup_cache: Dict[str, Optional[Dict]] = {}
         self._location_name_cache: Dict[int, str] = {}
+        self._location_path_to_pk_cache: Dict[str, int] = {}
+        self._location_pk_to_path_cache: Dict[int, str] = {}
         self._location_path_map_loaded = False
         self._part_barcodes_cache: Dict[int, List[str]] = {}
         self._barcode_endpoint_available: Optional[bool] = None
@@ -1055,6 +1080,12 @@ class BarcodeAssignmentView(MainView):
 
     def _load_locations(self, reload: bool = False):
         try:
+            if reload:
+                self._location_path_map_loaded = False
+                self._location_name_cache.clear()
+                self._location_path_to_pk_cache.clear()
+                self._location_pk_to_path_cache.clear()
+
             location_list = inventree_interface.build_stock_location_tree(reload=reload)
             self.fields['location_select'].options = [ft.dropdown.Option(location) for location in location_list]
 
@@ -1411,7 +1442,24 @@ class BarcodeAssignmentView(MainView):
             return path
 
         for loc_pk in node_name.keys():
-            self._location_name_cache[loc_pk] = build_path(loc_pk)
+            path = build_path(loc_pk)
+            self._location_name_cache[loc_pk] = path
+            self._location_path_to_pk_cache[path] = loc_pk
+
+    def _normalize_stock_location_value(self, location: str) -> str:
+        return '/'.join(
+            part.strip()
+            for part in re.sub(r'^-+\s+', '', str(location or '').strip()).split('/')
+            if part.strip()
+        )
+
+    def _get_stock_location_pk(self, location: str) -> int:
+        location_pk = inventree_interface.resolve_stock_location_pk(location, self._location_path_to_pk_cache)
+        if location_pk > 0:
+            cprint(f'[ASSIGN]\tResolved stock location from cache: {location} -> pk={location_pk}', silent=False)
+        else:
+            cprint(f'[ASSIGN]\tStock location cache miss: {location}', silent=False)
+        return location_pk
 
     def _resolve_location_string(self, part: Dict) -> str:
         """Resolve location display string from part payload (name or id)."""
@@ -1841,11 +1889,13 @@ class BarcodeAssignmentView(MainView):
 
         location_pk = 0
         if apply_location:
-            location_name = str(self.fields['location_select'].value or '').strip()
-            if not location_name:
+            location_value = self.fields['location_select'].value
+            if not location_value:
                 self.show_dialog(DialogType.ERROR, 'Select a stock location before applying')
                 return
-            location_pk = inventree_interface.get_inventree_stock_location_id([location_name])
+            cprint(f'[ASSIGN]\tResolving stock location from selection: {location_value}', silent=False)
+            location_pk = self._get_stock_location_pk(location_value)
+            cprint(f'[ASSIGN]\tStock location resolve result: pk={location_pk}', silent=False)
             if location_pk <= 0:
                 self.show_dialog(DialogType.ERROR, 'Selected stock location is not valid')
                 return

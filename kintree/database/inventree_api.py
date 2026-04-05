@@ -96,35 +96,30 @@ def get_inventree_category_id(category_tree: list) -> int:
 
 
 def get_inventree_stock_location_id(stock_location_tree: list) -> int:
-    ''' Get InvenTree stock location ID from name, specificy parent if subcategory '''
+    ''' Get InvenTree stock location ID from name, specify parent if subcategory '''
     global inventree_api
 
-    # Fetch all categories
+    if isinstance(stock_location_tree, str):
+        stock_location_tree = [part.strip() for part in re.sub(r'^-+\s+', '', stock_location_tree).split('/') if part.strip()]
+    else:
+        stock_location_tree = [re.sub(r'^-+\s+', '', str(part).strip()) for part in stock_location_tree if str(part).strip()]
+
+    if not stock_location_tree:
+        return -1
+
     stock_locations = StockLocation.list(inventree_api, name=stock_location_tree[-1])
     if len(stock_locations) == 1:
         return stock_locations[0].pk
-    else:
-        if len(stock_location_tree) > 1:
-            # Match the parent category
-            parent_stock_location_id = get_inventree_category_id(stock_location_tree[:-1])
-            if parent_stock_location_id:
-                for location in stock_locations:
-                    try:
-                        if parent_stock_location_id == location.getParentLocation().pk:
-                            return location.pk
-                    except AttributeError:
-                        pass
-                    #     # Check parent id match (if passed as argument)
-                    #     match = True
-                    #     if parent_stock_location_id:
-                    #         cprint(f'[TREE]\t{item.getParentCategory().pk} ?= {parent_stock_location_id}', silent=settings.HIDE_DEBUG)
-                    #         if item.getParentCategory().pk != parent_stock_location_id:
-                    #             match = False
-                    #     if match:
-                    #         cprint(f'[TREE]\t{item.name} ?= {category_name} => True', silent=settings.HIDE_DEBUG)
-                    #         return item.pk
-                    # else:
-                    #     cprint(f'[TREE]\t{item.name} ?= {category_name} => False', silent=settings.HIDE_DEBUG)
+
+    if len(stock_location_tree) > 1:
+        parent_stock_location_id = get_inventree_stock_location_id(stock_location_tree[:-1])
+        if parent_stock_location_id:
+            for location in stock_locations:
+                try:
+                    if parent_stock_location_id == location.getParentLocation().pk:
+                        return location.pk
+                except AttributeError:
+                    pass
 
     return -1
 
@@ -399,6 +394,93 @@ def get_stock_locations() -> dict:
             deep_add(categories, parent_list, cat)
 
     return categories
+
+
+def get_stock_location_id_map() -> dict:
+    '''Fetch a normalized stock location path -> PK map.''' 
+    global inventree_api
+
+    def _to_parent_id(parent_ref):
+        if isinstance(parent_ref, dict):
+            parent_ref = parent_ref.get('pk') or parent_ref.get('id')
+        if parent_ref in [None, '', 0, '0', 'None']:
+            return None
+        try:
+            return int(parent_ref)
+        except Exception:
+            return None
+
+    def _fetch_all(endpoint: str) -> list:
+        token = getattr(inventree_api, 'token', None)
+        base_url = str(getattr(inventree_api, 'base_url', '') or '').rstrip('/')
+        if not token or not base_url:
+            return []
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+
+        records = []
+        url = f'{base_url}{endpoint}'
+        params = {'limit': 250}
+
+        while url:
+            response = requests.get(url, headers=headers, params=params, timeout=20)
+            response.raise_for_status()
+            payload = response.json()
+
+            if isinstance(payload, dict):
+                rows = payload.get('results') or []
+                next_url = payload.get('next')
+            elif isinstance(payload, list):
+                rows = payload
+                next_url = None
+            else:
+                rows = []
+                next_url = None
+
+            for row in rows:
+                if isinstance(row, dict):
+                    records.append(row)
+
+            url = next_url
+            params = {}
+
+        return records
+
+    try:
+        records = _fetch_all('/api/stock/location/')
+    except Exception:
+        return {}
+
+    node_name = {}
+    node_parent = {}
+    for row in records:
+        try:
+            node_id = int(row.get('pk') or row.get('id'))
+        except Exception:
+            continue
+        node_name[node_id] = str(row.get('name') or '').strip()
+        node_parent[node_id] = _to_parent_id(row.get('parent'))
+
+    id_map = {}
+    for node_id, name in node_name.items():
+        if not name:
+            continue
+
+        path = [name]
+        parent_id = node_parent.get(node_id)
+        seen = {node_id}
+
+        while parent_id is not None and parent_id in node_name and parent_id not in seen:
+            seen.add(parent_id)
+            path.insert(0, node_name[parent_id])
+            parent_id = node_parent.get(parent_id)
+
+        id_map['/'.join(path)] = node_id
+
+    return id_map
 
 
 def get_category_tree(category_id: int) -> dict:
