@@ -1049,6 +1049,15 @@ class BarcodeAssignmentView(MainView):
 
                 row.current_barcodes = self._fetch_part_barcodes(part_pk=row.part_pk)
                 row.barcode_hash = str(part.get('barcode_hash') or '').strip()
+                if not row.current_barcodes and row.barcode_hash:
+                    # In some InvenTree versions GET /api/barcode/ is not available.
+                    # Fall back to part name (user-facing barcode label in this workflow).
+                    if row.part_name:
+                        row.current_barcodes = [row.part_name]
+                    else:
+                        generated = self._generate_part_barcode(part_pk=row.part_pk)
+                        if generated:
+                            row.current_barcodes = [generated]
                 row.has_barcode = bool(row.current_barcodes) or bool(row.barcode_hash)
 
                 has_location = bool(row.location and row.location != '-' and row.location.lower() != 'none')
@@ -1214,6 +1223,37 @@ class BarcodeAssignmentView(MainView):
             return values
         except Exception:
             return []
+
+    def _generate_part_barcode(self, part_pk: int) -> str:
+        """Generate or fetch internal barcode string for a part via barcode API."""
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if not api_obj:
+            return ''
+
+        token = getattr(api_obj, 'token', None)
+        base_url = getattr(api_obj, 'base_url', '')
+        if not token or not base_url:
+            return ''
+
+        endpoint = f"{base_url.rstrip('/')}/api/barcode/generate/"
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+
+        try:
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json={'model': 'part', 'pk': int(part_pk)},
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return str(payload.get('barcode') or '').strip()
+        except Exception:
+            return ''
 
     def _update_all_stock_items_location(self, part_pk: int, location_pk: int) -> tuple[int, int, str]:
         """Update location for all stock items that belong to a part.

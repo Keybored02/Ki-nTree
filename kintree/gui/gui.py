@@ -19,6 +19,19 @@ from .views.settings import (
 )
 
 
+def _stabilize_layout(page: ft.Page):
+    """Force a full layout refresh to avoid intermittent compressed rendering."""
+    try:
+        for view in page.views:
+            try:
+                view.update()
+            except Exception:
+                pass
+        page.update()
+    except Exception:
+        pass
+
+
 def init_gui(page: ft.Page):
     '''Initialize page'''
     # Alignments
@@ -29,9 +42,13 @@ def init_gui(page: ft.Page):
 
     # Window Icon
     page.window.icon = os.path.join(settings.PROJECT_DIR, 'gui', 'logo.ico')
-    page.window.title_bar_hidden = True
+    # Use the native title bar to avoid intermittent black/half-rendered chrome on Windows.
+    page.window.title_bar_hidden = False
     page.window.maximizable = True
     page.window.resizable = True
+
+    # Reflow when the window is resized / restored.
+    page.on_resize = lambda e: _stabilize_layout(page)
     
     # Theme
     update_theme(page)
@@ -42,6 +59,7 @@ def init_gui(page: ft.Page):
 
     # Update
     page.update()
+    _stabilize_layout(page)
 
 
 def kintree_gui(page: ft.Page):
@@ -92,6 +110,7 @@ def kintree_gui(page: ft.Page):
             else:
                 page.views.append(user_settings_view)
         page.update()
+        _stabilize_layout(page)
         if '/main/barcode' in page.route:
             barcode_view.focus_barcode_input()
         if '/main/assign' in page.route:

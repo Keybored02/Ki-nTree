@@ -306,8 +306,7 @@ SETTINGS = {
 
 # Settings AppBar
 settings_appbar = ft.AppBar(
-    title=ft.WindowDragArea(ft.Container(ft.Text('Ki-nTree Settings'),
-                                         width=10000), maximizable=True),
+    title=ft.Container(ft.Text('Ki-nTree Settings'), width=10000),
     bgcolor=ft.colors.SURFACE_VARIANT
 )
 
@@ -375,15 +374,6 @@ class SettingsView(CommonView):
 
         # Init view
         super().__init__(page=page, appbar=settings_appbar, navigation_rail=settings_navrail)
-        if not self.appbar.actions:
-            self.appbar.actions.extend(
-                [
-                    ft.IconButton(
-                        ft.icons.CLOSE,
-                        on_click=lambda _: page.window.close(),
-                    ),
-                ]
-            )
 
         # Update navigation rail
         self.navigation_rail.on_change = self.nav_rail_redirect

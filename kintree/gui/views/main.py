@@ -25,20 +25,15 @@ from ...search import snapeda_api
 
 # Main AppBar
 main_appbar = ft.AppBar(
-    leading=ft.WindowDragArea(
-        ft.Container(
-            content=ft.Image(
-                src=os.path.join(settings.PROJECT_DIR, 'gui', 'logo.ico'),
-                fit=ft.ImageFit.CONTAIN,
-            ),
-            padding=ft.padding.only(left=10),
-            expand=True,
+    leading=ft.Container(
+        content=ft.Image(
+            src=os.path.join(settings.PROJECT_DIR, 'gui', 'logo.ico'),
+            fit=ft.ImageFit.CONTAIN,
         ),
-        maximizable=True,
+        padding=ft.padding.only(left=10),
     ),
     leading_width=40,
-    title=ft.WindowDragArea(ft.Container(ft.Text(f'Ki-nTree | {__version__}'),
-                                         width=10000), maximizable=True),
+    title=ft.Container(ft.Text(f'Ki-nTree | {__version__}'), width=10000),
     center_title=False,
     bgcolor=ft.colors.SURFACE_VARIANT,
     actions=[],
@@ -147,15 +142,6 @@ class MainView(CommonView):
                         ft.icons.SETTINGS,
                         on_click=self.call_settings,
                     ),
-                    ft.IconButton(
-                        ft.icons.FULLSCREEN,
-                        tooltip='Fit to screen / restore',
-                        on_click=self.toggle_fit_to_screen,
-                    ),
-                    ft.IconButton(
-                        ft.icons.CLOSE,
-                        on_click=lambda _: page.window.close(),
-                    ),
                 ]
             )
         else:
@@ -182,17 +168,6 @@ class MainView(CommonView):
     def call_settings(self, e):
         handle_transition(self._page, transition=True)
         self._page.go('/settings')
-
-    def toggle_fit_to_screen(self, e):
-        window = self._page.window
-        current = bool(getattr(window, 'maximized', False))
-        window.maximized = not current
-        try:
-            e.control.icon = ft.icons.FULLSCREEN_EXIT if not current else ft.icons.FULLSCREEN
-            e.control.update()
-        except Exception:
-            pass
-        self._page.update()
 
     def reset_view(self, e, ignore=['enable'], hidden={}):
         def reset_field(field):
