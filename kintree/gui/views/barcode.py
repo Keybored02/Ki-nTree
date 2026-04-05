@@ -169,6 +169,12 @@ class BarcodeImportView(MainView):
             text='Parse Barcodes',
             on_click=self._parse_batch_barcodes,
         )
+
+        self.fields['clear_all_rows'] = ft.IconButton(
+            icon=ft.icons.DELETE_SWEEP,
+            tooltip='Clear all scanned items',
+            on_click=self._clear_all_rows,
+        )
         
         # Results table
         self.fields['results_table'] = ft.DataTable(
@@ -261,6 +267,7 @@ class BarcodeImportView(MainView):
                             ft.Row([
                                 self.fields['barcode_parse'],
                                 self.fields['barcode_clear'],
+                                self.fields['clear_all_rows'],
                             ]),
                             
                             ft.Divider(),
@@ -552,6 +559,14 @@ class BarcodeImportView(MainView):
         if 0 <= idx < len(self.scanned_rows):
             self.scanned_rows.pop(idx)
             self._update_results_table()
+
+    def _clear_all_rows(self, _):
+        """Clear all scanned rows."""
+        if not self.scanned_rows:
+            return
+        self.scanned_rows.clear()
+        self._update_results_table()
+        self._show_status('Cleared all scanned items', color='blue')
     
     def _on_category_changed(self, *args, **kwargs):
         """Apply selected category to all items."""
@@ -861,6 +876,12 @@ class BarcodeAssignmentView(MainView):
             on_click=lambda _: setattr(self.fields['barcode_input'], 'value', '') or self.fields['barcode_input'].update(),
         )
 
+        self.fields['clear_all_rows'] = ft.IconButton(
+            icon=ft.icons.DELETE_SWEEP,
+            tooltip='Clear all queued items',
+            on_click=self._clear_all_rows,
+        )
+
         self.fields['results_table'] = ft.DataTable(
             columns=[
                 ft.DataColumn(ft.Text('Input Code')),
@@ -927,7 +948,7 @@ class BarcodeAssignmentView(MainView):
                             ft.Divider(),
                             ft.Text('1. Scan or Paste Codes:', style=ft.TextThemeStyle.BODY_LARGE),
                             self.fields['barcode_input'],
-                            ft.Row([self.fields['parse_codes'], self.fields['clear_input']]),
+                            ft.Row([self.fields['parse_codes'], self.fields['clear_input'], self.fields['clear_all_rows']]),
                             ft.Divider(),
                             ft.Text('2. Review Existing Part Matches:', style=ft.TextThemeStyle.BODY_LARGE),
                             ft.Container(content=self.fields['results_table'], expand=True),
@@ -1713,6 +1734,14 @@ class BarcodeAssignmentView(MainView):
         with self._rows_lock:
             self.scanned_rows = [row for row in self.scanned_rows if row.row_id != row_id]
         self._update_results_table()
+
+    def _clear_all_rows(self, _):
+        with self._rows_lock:
+            if not self.scanned_rows:
+                return
+            self.scanned_rows.clear()
+        self._update_results_table()
+        self._set_status('Cleared all queued items', color='blue')
 
     def _update_results_table(self):
         with self._rows_lock:
