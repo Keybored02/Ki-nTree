@@ -66,55 +66,84 @@ def kintree_gui(page: ft.Page):
     '''Ki-nTree GUI'''
     # Init
     init_gui(page)
-    # Create main views
-    part_view = PartSearchView(page)
-    inventree_view = InventreeView(page)
-    kicad_view = KicadView(page)
-    create_view = CreateView(page)
-    barcode_view = BarcodeImportView(page)
-    assign_view = BarcodeAssignmentView(page)
-    # Create settings views
-    user_settings_view = UserSettingsView(page)
-    supplier_settings_view = SupplierSettingsView(page)
-    inventree_settings_view = InvenTreeSettingsView(page)
-    kicad_settings_view = KiCadSettingsView(page)
+    main_views = {
+        'part': None,
+        'inventree': None,
+        'kicad': None,
+        'create': None,
+        'barcode': None,
+        'assign': None,
+    }
+    settings_views = {
+        'user': None,
+        'supplier': None,
+        'inventree': None,
+        'kicad': None,
+    }
+
+    def get_main_view(key: str):
+        if key == 'part' and main_views['part'] is None:
+            main_views['part'] = PartSearchView(page)
+        elif key == 'inventree' and main_views['inventree'] is None:
+            main_views['inventree'] = InventreeView(page)
+        elif key == 'kicad' and main_views['kicad'] is None:
+            main_views['kicad'] = KicadView(page)
+        elif key == 'create' and main_views['create'] is None:
+            main_views['create'] = CreateView(page)
+        elif key == 'barcode' and main_views['barcode'] is None:
+            main_views['barcode'] = BarcodeImportView(page)
+        elif key == 'assign' and main_views['assign'] is None:
+            main_views['assign'] = BarcodeAssignmentView(page)
+        return main_views[key]
+
+    def get_settings_view(key: str):
+        if key == 'user' and settings_views['user'] is None:
+            settings_views['user'] = UserSettingsView(page)
+        elif key == 'supplier' and settings_views['supplier'] is None:
+            settings_views['supplier'] = SupplierSettingsView(page)
+        elif key == 'inventree' and settings_views['inventree'] is None:
+            settings_views['inventree'] = InvenTreeSettingsView(page)
+        elif key == 'kicad' and settings_views['kicad'] is None:
+            settings_views['kicad'] = KiCadSettingsView(page)
+        return settings_views[key]
 
     # Routing
     def route_change(route):
+        current_route = page.route or '/'
         # print(f'\n--> Routing to {route.route}')
-        if '/main' in page.route or page.route == '/':
+        if '/main' in current_route or current_route == '/':
             page.views.clear()
-            if 'part' in page.route or page.route == '/':
-                page.views.append(part_view)
-            if 'inventree' in page.route:
-                page.views.append(inventree_view)
-            elif 'kicad' in page.route:
-                page.views.append(kicad_view)
-            elif 'create' in page.route:
-                page.views.append(create_view)
-            elif 'assign' in page.route:
-                page.views.append(assign_view)
-            elif 'barcode' in page.route:
-                page.views.append(barcode_view)
-        elif '/settings' in page.route:
-            if '/settings' in page.views[-1].route:
+            if 'part' in current_route or current_route == '/':
+                page.views.append(get_main_view('part'))
+            if 'inventree' in current_route:
+                page.views.append(get_main_view('inventree'))
+            elif 'kicad' in current_route:
+                page.views.append(get_main_view('kicad'))
+            elif 'create' in current_route:
+                page.views.append(get_main_view('create'))
+            elif 'assign' in current_route:
+                page.views.append(get_main_view('assign'))
+            elif 'barcode' in current_route:
+                page.views.append(get_main_view('barcode'))
+        elif '/settings' in current_route:
+            if page.views and '/settings' in page.views[-1].route:
                 page.views.pop()
-            if 'user' in page.route:
-                page.views.append(user_settings_view)
-            elif 'supplier' in page.route:
-                page.views.append(supplier_settings_view)
-            elif 'inventree' in page.route:
-                page.views.append(inventree_settings_view)
-            elif 'kicad' in page.route:
-                page.views.append(kicad_settings_view)
+            if 'user' in current_route:
+                page.views.append(get_settings_view('user'))
+            elif 'supplier' in current_route:
+                page.views.append(get_settings_view('supplier'))
+            elif 'inventree' in current_route:
+                page.views.append(get_settings_view('inventree'))
+            elif 'kicad' in current_route:
+                page.views.append(get_settings_view('kicad'))
             else:
-                page.views.append(user_settings_view)
+                page.views.append(get_settings_view('user'))
         page.update()
         _stabilize_layout(page)
-        if '/main/barcode' in page.route:
-            barcode_view.focus_barcode_input()
-        if '/main/assign' in page.route:
-            assign_view.focus_input()
+        if '/main/barcode' in current_route:
+            main_views['barcode'].focus_barcode_input()
+        if '/main/assign' in current_route:
+            main_views['assign'].focus_input()
 
     def view_pop(view):
         '''Pop setting view'''
@@ -137,4 +166,4 @@ def kintree_gui(page: ft.Page):
     page.on_route_change = route_change
     page.on_view_pop = view_pop
 
-    page.go(page.route)
+    page.go(page.route or '/')

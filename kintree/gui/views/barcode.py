@@ -127,6 +127,7 @@ class BarcodeImportView(MainView):
         self.scanned_rows: List[BarcodeScannedRow] = []
         self.categories = {}
         self.stock_locations = {}
+        self._initial_data_loaded = False
 
         # Call parent init
         super().__init__(page=page)
@@ -315,9 +316,14 @@ class BarcodeImportView(MainView):
             expand=True,
         )
         
-        # Load categories and locations
-        self._load_categories_and_locations()
         self.focus_barcode_input()
+
+    def did_mount(self):
+        if not self._initial_data_loaded:
+            self._initial_data_loaded = True
+            self._load_categories_and_locations()
+        self.focus_barcode_input()
+        return super().did_mount()
 
     def focus_barcode_input(self):
         """Focus scanner input so cursor is ready when entering this page."""
@@ -801,6 +807,7 @@ class BarcodeAssignmentView(MainView):
         self.scanned_rows: List[ExistingPartScanRow] = []
         self._row_counter = 0
         self._rows_lock = threading.Lock()
+        self._initial_locations_loaded = False
         super().__init__(page=page)
         self.build_page()
 
@@ -921,8 +928,14 @@ class BarcodeAssignmentView(MainView):
             expand=True,
         )
 
-        self._load_locations()
         self.focus_input()
+
+    def did_mount(self):
+        if not self._initial_locations_loaded:
+            self._initial_locations_loaded = True
+            self._load_locations()
+        self.focus_input()
+        return super().did_mount()
 
     def focus_input(self):
         try:
