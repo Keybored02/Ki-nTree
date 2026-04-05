@@ -1292,19 +1292,13 @@ class BarcodeAssignmentView(MainView):
         self._update_results_table()
 
     def _find_part_by_lookup(self, lookup_value: str) -> Optional[Dict]:
-        cache_key = str(lookup_value or '').strip().lower()
-        if cache_key in self._part_lookup_cache:
-            return self._part_lookup_cache[cache_key]
-
         api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
         if not api_obj:
-            self._part_lookup_cache[cache_key] = None
             return None
 
         token = getattr(api_obj, 'token', None)
         base_url = getattr(api_obj, 'base_url', '')
         if not token or not base_url:
-            self._part_lookup_cache[cache_key] = None
             return None
 
         endpoint = f"{base_url.rstrip('/')}/api/part/"
@@ -1320,7 +1314,6 @@ class BarcodeAssignmentView(MainView):
             timeout=20,
         )
         if response is None:
-            self._part_lookup_cache[cache_key] = None
             return None
         payload = response.json()
 
@@ -1332,7 +1325,6 @@ class BarcodeAssignmentView(MainView):
             rows = []
 
         if not rows:
-            self._part_lookup_cache[cache_key] = None
             return None
 
         needle = lookup_value.strip().lower()
@@ -1340,10 +1332,8 @@ class BarcodeAssignmentView(MainView):
             ipn = str(candidate.get('IPN') or '').strip().lower()
             name = str(candidate.get('name') or '').strip().lower()
             if needle and (needle == ipn or needle == name):
-                self._part_lookup_cache[cache_key] = candidate
                 return candidate
 
-        self._part_lookup_cache[cache_key] = rows[0]
         return rows[0]
 
     def _ensure_location_path_cache(self):
@@ -1476,37 +1466,19 @@ class BarcodeAssignmentView(MainView):
         except (TypeError, ValueError):
             return str(location_id)
 
-        cached_location = self._location_name_cache.get(location_id)
-        if cached_location is not None:
-            return cached_location
-
-        # Prefer one-time location map load (single API sweep) over per-row tree calls.
-        self._ensure_location_path_cache()
-        cached_location = self._location_name_cache.get(location_id)
-        if cached_location is not None:
-            return cached_location
-
         try:
             location_tree = inventree_interface.inventree_api.get_stock_location_tree(location_id)
             # API helper returns leaf->root insertion order, so reverse for root->leaf
             names = [str(name) for name in reversed(list(location_tree.values())) if str(name).strip()]
             if names:
-                resolved = '/'.join(names)
-                self._location_name_cache[location_id] = resolved
-                return resolved
+                return '/'.join(names)
         except Exception:
             pass
 
-        fallback = str(location_id)
-        self._location_name_cache[location_id] = fallback
-        return fallback
+        return str(location_id)
 
     def _fetch_part_barcodes(self, part_pk: int) -> List[str]:
         """Fetch current external barcode values for a part via /api/barcode/."""
-        cached_values = self._part_barcodes_cache.get(int(part_pk))
-        if cached_values is not None:
-            return list(cached_values)
-
         api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
         if not api_obj:
             return []
@@ -1536,7 +1508,6 @@ class BarcodeAssignmentView(MainView):
                 self._barcode_endpoint_available = False
 
         if not self._barcode_endpoint_available:
-            self._part_barcodes_cache[int(part_pk)] = []
             return []
 
         def _extract_values(payload) -> List[str]:
@@ -1567,11 +1538,9 @@ class BarcodeAssignmentView(MainView):
                 timeout=20,
             )
             if response is None:
-                self._part_barcodes_cache[int(part_pk)] = []
                 return []
             values = _extract_values(response.json())
             if values:
-                self._part_barcodes_cache[int(part_pk)] = list(values)
                 return values
         except Exception:
             pass
@@ -1586,7 +1555,6 @@ class BarcodeAssignmentView(MainView):
                 timeout=20,
             )
             if response is None:
-                self._part_barcodes_cache[int(part_pk)] = []
                 return []
             payload = response.json()
             if isinstance(payload, dict):
@@ -1616,10 +1584,8 @@ class BarcodeAssignmentView(MainView):
                 barcode_value = item.get('data') or item.get('barcode') or item.get('value')
                 if barcode_value:
                     values.append(str(barcode_value))
-            self._part_barcodes_cache[int(part_pk)] = list(values)
             return values
         except Exception:
-            self._part_barcodes_cache[int(part_pk)] = []
             return []
 
     def _generate_part_barcode(self, part_pk: int) -> str:
