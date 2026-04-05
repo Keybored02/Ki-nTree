@@ -319,6 +319,7 @@ class BarcodeImportView(MainView):
         self.focus_barcode_input()
 
     def did_mount(self):
+        self._load_categories_and_locations()
         self.focus_barcode_input()
         return super().did_mount()
 
@@ -345,6 +346,17 @@ class BarcodeImportView(MainView):
             self.stock_locations = location_list
             self.fields['category_select'].options = category_options
             self.fields['location_select'].options = location_options
+
+            # Ensure dropdown wrappers are interactive immediately after mount.
+            self.fields['category_select'].disabled = False
+            self.fields['location_select'].disabled = False
+            self.fields['category_select'].done_search()
+            self.fields['location_select'].done_search()
+            try:
+                self.fields['category_select'].update()
+                self.fields['location_select'].update()
+            except AssertionError:
+                pass
             
             self._page.update()
         except Exception as e:
@@ -936,6 +948,7 @@ class BarcodeAssignmentView(MainView):
         self.focus_input()
 
     def did_mount(self):
+        self._load_locations()
         self.focus_input()
         return super().did_mount()
 
@@ -986,6 +999,15 @@ class BarcodeAssignmentView(MainView):
         try:
             location_list = inventree_interface.build_stock_location_tree(reload=False)
             self.fields['location_select'].options = [ft.dropdown.Option(location) for location in location_list]
+
+            # Keep the control explicitly interactive on initial route render.
+            self.fields['location_select'].disabled = False
+            self.fields['location_select'].done_search()
+            try:
+                self.fields['location_select'].update()
+            except AssertionError:
+                pass
+
             self._page.update()
         except Exception as exc:
             cprint(f'[ERROR] Failed to load stock locations: {exc}', silent=False)
