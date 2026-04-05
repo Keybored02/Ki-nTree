@@ -10,6 +10,7 @@ Supports: TME (key-value), Mouser (GS1-128), Digi-Key (GS1-128) barcodes.
 import flet as ft
 import threading
 import requests
+import time
 from typing import Dict, List, Optional
 
 from ...common.tools import cprint
@@ -127,7 +128,6 @@ class BarcodeImportView(MainView):
         self.scanned_rows: List[BarcodeScannedRow] = []
         self.categories = {}
         self.stock_locations = {}
-        self._initial_data_loaded = False
 
         # Call parent init
         super().__init__(page=page)
@@ -319,9 +319,6 @@ class BarcodeImportView(MainView):
         self.focus_barcode_input()
 
     def did_mount(self):
-        if not self._initial_data_loaded:
-            self._initial_data_loaded = True
-            self._load_categories_and_locations()
         self.focus_barcode_input()
         return super().did_mount()
 
@@ -338,12 +335,8 @@ class BarcodeImportView(MainView):
         """Load available categories and stock locations."""
         try:
             category_list = inventree_interface.build_category_tree(reload=False)
-            if not category_list and inventree_interface.connect_to_server():
-                category_list = inventree_interface.build_category_tree(reload=True)
 
             location_list = inventree_interface.build_stock_location_tree(reload=False)
-            if not location_list and inventree_interface.connect_to_server():
-                location_list = inventree_interface.build_stock_location_tree(reload=True)
 
             category_options = [ft.dropdown.Option(category) for category in category_list]
             location_options = [ft.dropdown.Option(location) for location in location_list]
@@ -584,6 +577,19 @@ class BarcodeImportView(MainView):
             self.fields['status_message'].update()
         except AssertionError:
             pass
+
+    def _connect_server_with_retries(self, attempts: int = 3, delay_seconds: float = 1.5) -> bool:
+        """Try connecting to InvenTree multiple times before failing."""
+        for attempt in range(1, attempts + 1):
+            if inventree_interface.connect_to_server():
+                return True
+            if attempt < attempts:
+                self._show_status(
+                    f'InvenTree offline. Retrying ({attempt}/{attempts - 1}) in {delay_seconds:.1f}s...',
+                    color='orange',
+                )
+                time.sleep(delay_seconds)
+        return False
     
     def _on_submit(self, _):
         """Submit scanned items for import."""
@@ -646,12 +652,12 @@ class BarcodeImportView(MainView):
         self.fields['import_progress_message'].update()
         self._show_status('Starting import...', color='blue')
 
-        if not inventree_interface.connect_to_server():
+        if not self._connect_server_with_retries(attempts=3, delay_seconds=1.5):
             cprint('[BARCODE]\tImport aborted: failed to connect to InvenTree', silent=False)
-            self.fields['import_progress_message'].value = 'Import failed: could not connect'
+            self.fields['import_progress_message'].value = 'Import failed: server offline after retries'
             self.fields['import_progress_message'].color = 'red'
             self.fields['import_progress_message'].update()
-            self.show_dialog(DialogType.ERROR, 'Failed to connect to InvenTree server')
+            self.show_dialog(DialogType.ERROR, 'Failed to connect to InvenTree server after 3 retries')
             return
         
         success = 0
@@ -807,7 +813,6 @@ class BarcodeAssignmentView(MainView):
         self.scanned_rows: List[ExistingPartScanRow] = []
         self._row_counter = 0
         self._rows_lock = threading.Lock()
-        self._initial_locations_loaded = False
         super().__init__(page=page)
         self.build_page()
 
@@ -931,9 +936,6 @@ class BarcodeAssignmentView(MainView):
         self.focus_input()
 
     def did_mount(self):
-        if not self._initial_locations_loaded:
-            self._initial_locations_loaded = True
-            self._load_locations()
         self.focus_input()
         return super().did_mount()
 
@@ -952,11 +954,37 @@ class BarcodeAssignmentView(MainView):
         except AssertionError:
             pass
 
+    def _connect_server_with_retries(
+            self,
+            attempts: int = 3,
+            delay_seconds: float = 1.5,
+            row: Optional[ExistingPartScanRow] = None,
+    ) -> bool:
+        """Try connecting to InvenTree multiple times before failing."""
+        for attempt in range(1, attempts + 1):
+            if row is not None:
+                row.status = f'Checking server ({attempt}/{attempts})...'
+                self._update_results_table()
+
+            if inventree_interface.connect_to_server():
+                return True
+
+            if attempt < attempts:
+                if row is not None:
+                    row.status = f'Server offline, retrying ({attempt}/{attempts - 1})...'
+                    self._update_results_table()
+                else:
+                    self._set_status(
+                        f'InvenTree offline. Retrying ({attempt}/{attempts - 1}) in {delay_seconds:.1f}s...',
+                        color='orange',
+                    )
+                time.sleep(delay_seconds)
+
+        return False
+
     def _load_locations(self):
         try:
             location_list = inventree_interface.build_stock_location_tree(reload=False)
-            if not location_list and inventree_interface.connect_to_server():
-                location_list = inventree_interface.build_stock_location_tree(reload=True)
             self.fields['location_select'].options = [ft.dropdown.Option(location) for location in location_list]
             self._page.update()
         except Exception as exc:
@@ -1046,10 +1074,16 @@ class BarcodeAssignmentView(MainView):
             return
 
         try:
-            if not inventree_interface.connect_to_server():
-                row.status = 'Server offline'
+            row.status = 'Checking server...'
+            self._update_results_table()
+
+            if not self._connect_server_with_retries(attempts=3, delay_seconds=1.0, row=row):
+                row.status = 'Server offline (after retries)'
                 self._update_results_table()
                 return
+
+            row.status = 'Checking part...'
+            self._update_results_table()
 
             part = self._find_part_by_lookup(row.lookup_value)
             if not part:
@@ -1401,8 +1435,8 @@ class BarcodeAssignmentView(MainView):
             self.show_dialog(DialogType.ERROR, 'No valid items to update')
             return
 
-        if not inventree_interface.connect_to_server():
-            self.show_dialog(DialogType.ERROR, 'Failed to connect to InvenTree server')
+        if not self._connect_server_with_retries(attempts=3, delay_seconds=1.5):
+            self.show_dialog(DialogType.ERROR, 'Failed to connect to InvenTree server after 3 retries')
             return
 
         apply_location = bool(self.fields['assign_location_check'].value)
