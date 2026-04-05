@@ -131,6 +131,7 @@ class BarcodeImportView(MainView):
             min_lines=3,
             max_lines=6,
             on_submit=self._on_barcode_scanned,
+            on_change=self._on_barcode_input_changed,
             autofocus=True,
             hint_text='Scan QR/barcode code or paste multiple codes (one per line)',
         )
@@ -206,6 +207,7 @@ class BarcodeImportView(MainView):
         self.fields['use_manufacturer_barcode_check'] = ft.Checkbox(
             label='Use manufacturer PN as barcode',
             value=True,
+            on_change=lambda _: self._update_results_table(),
         )
         
         # Submit button
@@ -295,6 +297,16 @@ class BarcodeImportView(MainView):
         
         # Load categories and locations
         self._load_categories_and_locations()
+        self.focus_barcode_input()
+
+    def focus_barcode_input(self):
+        """Focus scanner input so cursor is ready when entering this page."""
+        try:
+            self.fields['barcode_input'].focus()
+            self.fields['barcode_input'].update()
+        except AssertionError:
+            # Control may not be mounted yet; caller can try again later.
+            pass
     
     def _load_categories_and_locations(self):
         """Load available categories and stock locations."""
@@ -352,21 +364,71 @@ class BarcodeImportView(MainView):
         barcode = self.fields['barcode_input'].value.strip()
         if not barcode:
             return
-        
-        parsed = self.parser.parse(barcode)
-        if parsed['supplier'] == 'unknown':
-            self._show_status(f'Unknown barcode format', color='red')
+
+        if self._append_parsed_barcode(barcode):
+            self.fields['barcode_input'].value = ''
+            try:
+                self.fields['barcode_input'].update()
+                self.fields['barcode_input'].focus()
+            except AssertionError:
+                pass
+
+    def _on_barcode_input_changed(self, _):
+        """Auto-parse scanner input when newline terminator is received."""
+        text = self.fields['barcode_input'].value or ''
+
+        if '\n' not in text and '\r' not in text:
             return
-        
-        row = BarcodeScannedRow(barcode, parsed)
-        self.scanned_rows.append(row)
+
+        lines = [line.strip() for line in text.replace('\r', '\n').split('\n') if line.strip()]
+        if not lines:
+            self.fields['barcode_input'].value = ''
+            try:
+                self.fields['barcode_input'].update()
+                self.fields['barcode_input'].focus()
+            except AssertionError:
+                pass
+            return
+
+        success = 0
+        failed = 0
+        for line in lines:
+            if self._append_parsed_barcode(line, update_table=False, update_status=False):
+                success += 1
+            else:
+                failed += 1
+
         self._update_results_table()
         self.fields['barcode_input'].value = ''
         try:
             self.fields['barcode_input'].update()
+            self.fields['barcode_input'].focus()
         except AssertionError:
             pass
-        self._show_status(f'Scanned: {row.supplier.upper()} - {row.search_name}', color='green')
+
+        if success:
+            self._show_status(
+                f'Scanned {success} item(s)' + (f' ({failed} failed)' if failed else ''),
+                color='green' if failed == 0 else 'orange',
+            )
+        else:
+            self._show_status('Unknown barcode format', color='red')
+
+    def _append_parsed_barcode(self, barcode: str, update_table: bool = True, update_status: bool = True) -> bool:
+        """Parse and append one barcode row without removing existing entries."""
+        parsed = self.parser.parse(barcode)
+        if parsed.get('supplier') == 'unknown':
+            if update_status:
+                self._show_status('Unknown barcode format', color='red')
+            return False
+
+        row = BarcodeScannedRow(barcode, parsed)
+        self.scanned_rows.append(row)
+        if update_table:
+            self._update_results_table()
+        if update_status:
+            self._show_status(f'Scanned: {row.supplier.upper()} - {row.search_name}', color='green')
+        return True
     
     def _parse_batch_barcodes(self, _):
         """Parse multiple barcodes from paste input."""
@@ -380,13 +442,9 @@ class BarcodeImportView(MainView):
         success = 0
         failed = 0
         for line in lines:
-            parsed = self.parser.parse(line)
-            if parsed['supplier'] == 'unknown':
+            if not self._append_parsed_barcode(line, update_table=False, update_status=False):
                 failed += 1
                 continue
-            
-            row = BarcodeScannedRow(line, parsed)
-            self.scanned_rows.append(row)
             success += 1
         
         self._update_results_table()
@@ -397,6 +455,9 @@ class BarcodeImportView(MainView):
     def _update_results_table(self):
         """Refresh the results table with current scanned items."""
         rows = []
+        use_manufacturer_barcode = self.fields.get('use_manufacturer_barcode_check', None)
+        show_barcode = bool(use_manufacturer_barcode.value) if use_manufacturer_barcode else True
+
         for idx, row in enumerate(self.scanned_rows):
             remove_btn = ft.IconButton(
                 icon=ft.icons.DELETE,
@@ -426,7 +487,7 @@ class BarcodeImportView(MainView):
                     ),
                     ft.DataCell(
                         ft.Text(
-                            row.barcode,
+                            row.barcode if show_barcode else '',
                             selectable=True,
                             no_wrap=True,
                             overflow=ft.TextOverflow.ELLIPSIS,
@@ -619,10 +680,21 @@ class BarcodeImportView(MainView):
                     kicad=False,
                     show_progress=False,
                     is_custom=False,
-                    stock=stock_payload,
+                    stock=None,
                 )
                 
                 if part_pk:
+                    # Always handle stock here so existing parts are not skipped.
+                    if stock_payload is not None:
+                        stock_data = dict(stock_payload)
+                        stock_data['part'] = part_pk
+                        stock_result = inventree_interface.inventree_api.create_stock(stock_data)
+                        if not stock_result:
+                            failed += 1
+                            failures.append(f'{row.search_name}: Failed to create stock')
+                            cprint(f'[BARCODE]\tFailed to add stock for {item_label}', silent=False)
+                            continue
+
                     # Add barcode if available
                     use_manufacturer_barcode = self.fields['use_manufacturer_barcode_check'].value
                     barcode_value = row.barcode if use_manufacturer_barcode else ''

@@ -86,6 +86,8 @@ def kintree_gui(page: ft.Page):
             else:
                 page.views.append(user_settings_view)
         page.update()
+        if '/main/barcode' in page.route:
+            barcode_view.focus_barcode_input()
 
     def view_pop(view):
         '''Pop setting view'''

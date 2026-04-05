@@ -48,6 +48,42 @@ class BarcodeParser:
     }
 
     @staticmethod
+    def _normalize_gs1_input(barcode: str) -> str:
+        """Normalize scanner output when leading GS1 prefix chars are missing.
+
+        Some scanners strip control characters and can also drop leading prefix
+        characters (e.g. ``[`` or ``[)``), yielding forms like ``)>06...`` or
+        ``>06...``. This helper restores a canonical ``[)>06`` prefix when
+        possible so downstream detection/parsing remains reliable.
+        """
+        data = str(barcode or '').strip()
+        if not data:
+            return data
+
+        if data.startswith('[)>\x1e06\x1d') or data.startswith('[)>06'):
+            return data
+
+        # If canonical marker exists later in the payload, trim leading noise.
+        idx = data.find('[)>06')
+        if idx > 0:
+            return data[idx:]
+
+        # Recover commonly truncated variants.
+        if ')>06' in data:
+            i = data.find(')>06')
+            return '[' + data[i:]
+
+        if '>06' in data:
+            i = data.find('>06')
+            return '[)' + data[i:]
+
+        # Last-resort recovery: if stream starts with 06 and looks GS1-like.
+        if data.startswith('06') and re.search(r'06[KPQ1]', data):
+            return '[)>' + data
+
+        return data
+
+    @staticmethod
     def _extract_compact_quantity(data: str) -> int:
         """Extract quantity from compact GS1 text where delimiters may be missing.
 
@@ -80,6 +116,8 @@ class BarcodeParser:
         Returns:
             Supplier key: 'lcsc', 'tme', 'mouser', 'digikey', or 'unknown'
         """
+        barcode = BarcodeParser._normalize_gs1_input(barcode)
+
         # LCSC: JSON-like format with curly braces
         if barcode.strip().startswith('{') and ('pm:' in barcode or 'pc:' in barcode):
             return 'lcsc'
@@ -423,6 +461,7 @@ class BarcodeParser:
             quantity, and supplier-specific fields. On error, includes
             'supplier': 'unknown' and an 'error' message.
         """
+        barcode = cls._normalize_gs1_input(barcode)
         barcode = barcode.strip()
         supplier = cls.detect_supplier(barcode)
 
