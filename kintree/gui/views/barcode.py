@@ -411,8 +411,11 @@ class BarcodeImportView(MainView):
                 f'Scanned {success} item(s)' + (f' ({failed} failed)' if failed else ''),
                 color='green' if failed == 0 else 'orange',
             )
+            if failed:
+                self.show_dialog(DialogType.ERROR, f'Unrecognized barcode format for {failed} item(s)')
         else:
             self._show_status('Unknown barcode format', color='red')
+            self.show_dialog(DialogType.ERROR, 'Unrecognized barcode format')
 
     def _append_parsed_barcode(self, barcode: str, update_table: bool = True, update_status: bool = True) -> bool:
         """Parse and append one barcode row without removing existing entries."""
@@ -420,6 +423,7 @@ class BarcodeImportView(MainView):
         if parsed.get('supplier') == 'unknown':
             if update_status:
                 self._show_status('Unknown barcode format', color='red')
+                self.show_dialog(DialogType.ERROR, 'Unrecognized barcode format')
             return False
 
         row = BarcodeScannedRow(barcode, parsed)
@@ -451,6 +455,8 @@ class BarcodeImportView(MainView):
         self.fields['barcode_input'].value = ''
         self.fields['barcode_input'].update()
         self._show_status(f'Parsed {success} items ({failed} failed)', color='green' if success > 0 else 'red')
+        if failed:
+            self.show_dialog(DialogType.ERROR, f'Unrecognized barcode format for {failed} item(s)')
     
     def _update_results_table(self):
         """Refresh the results table with current scanned items."""
