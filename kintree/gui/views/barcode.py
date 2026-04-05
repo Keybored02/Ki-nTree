@@ -353,7 +353,7 @@ class BarcodeImportView(MainView):
     def _reload_categories(self, _):
         """Reload the category tree from InvenTree."""
         try:
-            if not inventree_interface.connect_to_server():
+            if not self._connect_server_with_retries(attempts=3, delay_seconds=1.5):
                 self.show_dialog(DialogType.ERROR, 'ERROR: Failed to connect to InvenTree server')
                 return
 
@@ -367,7 +367,7 @@ class BarcodeImportView(MainView):
     def _reload_locations(self, _):
         """Reload the stock location tree from InvenTree."""
         try:
-            if not inventree_interface.connect_to_server():
+            if not self._connect_server_with_retries(attempts=3, delay_seconds=1.5):
                 self.show_dialog(DialogType.ERROR, 'ERROR: Failed to connect to InvenTree server')
                 return
 
@@ -991,11 +991,55 @@ class BarcodeAssignmentView(MainView):
             cprint(f'[ERROR] Failed to load stock locations: {exc}', silent=False)
 
     def _reload_locations(self, _):
-        if not inventree_interface.connect_to_server():
+        if not self._connect_server_with_retries(attempts=3, delay_seconds=1.5):
             self.show_dialog(DialogType.ERROR, 'ERROR: Failed to connect to InvenTree server')
             return
         self._load_locations()
         self._set_status('Stock locations reloaded', color='green')
+
+    def _request_with_retries(
+            self,
+            method: str,
+            url: str,
+            attempts: int = 3,
+            delay_seconds: float = 1.0,
+            row: Optional[ExistingPartScanRow] = None,
+            **kwargs,
+    ) -> Optional[requests.Response]:
+        """Run HTTP request with retry on transient/network failures."""
+        for attempt in range(1, attempts + 1):
+            try:
+                response = requests.request(method=method.upper(), url=url, **kwargs)
+                # Retry transient upstream failures and rate limits.
+                if response.status_code == 429 or response.status_code >= 500:
+                    raise requests.HTTPError(f'HTTP {response.status_code}', response=response)
+                response.raise_for_status()
+                return response
+            except requests.RequestException as exc:
+                status_code = None
+                try:
+                    status_code = int(getattr(getattr(exc, 'response', None), 'status_code', 0))
+                except Exception:
+                    status_code = None
+
+                # Do not retry most client-side request errors (except 429).
+                if status_code and 400 <= status_code < 500 and status_code != 429:
+                    return None
+
+                if attempt < attempts:
+                    if row is not None:
+                        row.status = f'Network retry ({attempt}/{attempts - 1})...'
+                        self._update_results_table()
+                    else:
+                        self._set_status(
+                            f'Network issue. Retrying ({attempt}/{attempts - 1}) in {delay_seconds:.1f}s...',
+                            color='orange',
+                        )
+                    time.sleep(delay_seconds)
+                else:
+                    return None
+
+        return None
 
     def _on_code_submit(self, _):
         text = (self.fields['barcode_input'].value or '').strip()
@@ -1136,13 +1180,15 @@ class BarcodeAssignmentView(MainView):
             'Authorization': f'Token {token}',
             'Accept': 'application/json',
         }
-        response = requests.get(
-            endpoint,
+        response = self._request_with_retries(
+            method='GET',
+            url=endpoint,
             headers=headers,
             params={'search': lookup_value, 'limit': 20},
             timeout=20,
         )
-        response.raise_for_status()
+        if response is None:
+            return None
         payload = response.json()
 
         if isinstance(payload, dict):
@@ -1227,8 +1273,15 @@ class BarcodeAssignmentView(MainView):
 
         # Try filtered query first.
         try:
-            response = requests.get(endpoint, headers=headers, params={'part': part_pk, 'limit': 100}, timeout=20)
-            response.raise_for_status()
+            response = self._request_with_retries(
+                method='GET',
+                url=endpoint,
+                headers=headers,
+                params={'part': part_pk, 'limit': 100},
+                timeout=20,
+            )
+            if response is None:
+                return []
             values = _extract_values(response.json())
             if values:
                 return values
@@ -1237,8 +1290,15 @@ class BarcodeAssignmentView(MainView):
 
         # Fallback for servers where filtering differs: fetch and client-filter.
         try:
-            response = requests.get(endpoint, headers=headers, params={'limit': 200}, timeout=20)
-            response.raise_for_status()
+            response = self._request_with_retries(
+                method='GET',
+                url=endpoint,
+                headers=headers,
+                params={'limit': 200},
+                timeout=20,
+            )
+            if response is None:
+                return []
             payload = response.json()
             if isinstance(payload, dict):
                 rows = payload.get('results') or []
@@ -1290,13 +1350,15 @@ class BarcodeAssignmentView(MainView):
         }
 
         try:
-            response = requests.post(
-                endpoint,
+            response = self._request_with_retries(
+                method='POST',
+                url=endpoint,
                 headers=headers,
                 json={'model': 'part', 'pk': int(part_pk)},
                 timeout=20,
             )
-            response.raise_for_status()
+            if response is None:
+                return ''
             payload = response.json()
             return str(payload.get('barcode') or '').strip()
         except Exception:
@@ -1330,8 +1392,15 @@ class BarcodeAssignmentView(MainView):
             params = {'part': part_pk, 'limit': 100}
 
             while url:
-                response = requests.get(url, headers=headers, params=params, timeout=20)
-                response.raise_for_status()
+                response = self._request_with_retries(
+                    method='GET',
+                    url=url,
+                    headers=headers,
+                    params=params,
+                    timeout=20,
+                )
+                if response is None:
+                    return updated, failed, 'Failed to list stock items after retries'
                 payload = response.json()
 
                 if isinstance(payload, dict):
@@ -1350,14 +1419,15 @@ class BarcodeAssignmentView(MainView):
                         continue
 
                     patch_url = f"{base_url.rstrip('/')}/api/stock/{item_pk}/"
-                    patch_resp = requests.patch(
-                        patch_url,
+                    patch_resp = self._request_with_retries(
+                        method='PATCH',
+                        url=patch_url,
                         headers=headers,
                         json={'location': int(location_pk)},
                         timeout=20,
                     )
 
-                    if patch_resp.status_code in [200, 202]:
+                    if patch_resp is not None and patch_resp.status_code in [200, 202]:
                         updated += 1
                     else:
                         failed += 1
