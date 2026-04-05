@@ -1,4 +1,5 @@
 import copy
+import time
 
 from ..config import settings
 from ..common import part_tools, progress
@@ -10,10 +11,23 @@ from ..search import search_api, automationdirect_api, digikey_api, mouser_api, 
 category_separator = '/'
 
 
-def connect_to_server(timeout=5) -> bool:
+def connect_to_server(timeout=5, force_reconnect=False) -> bool:
     ''' Connect to InvenTree server using user settings '''
     connect = False
     settings.load_inventree_settings()
+
+    # Fast-path: reuse an already authenticated API client unless a forced reconnect is requested.
+    if not force_reconnect:
+        try:
+            api_obj = getattr(inventree_api, 'inventree_api', None)
+            api_token = getattr(api_obj, 'token', None)
+            api_base_url = str(getattr(api_obj, 'base_url', '') or '').strip()
+            cfg_server = str(settings.SERVER_ADDRESS or '').strip().rstrip('/')
+            if api_obj and api_token and api_base_url and cfg_server and api_base_url.startswith(cfg_server):
+                return True
+        except Exception:
+            pass
+
     if not settings.USERNAME:
         token = settings.PASSWORD
     else:
@@ -83,9 +97,17 @@ def build_category_tree(reload=False, category=None) -> dict:
         return
 
     if reload:
+        start_ts = time.perf_counter()
+        cprint('[TREE]\tCategory reload start')
         categories = inventree_api.get_categories()
         category_data.update({'CATEGORIES': categories})
         config_interface.dump_file(category_data, settings.CONFIG_CATEGORIES)
+        elapsed_ms = (time.perf_counter() - start_ts) * 1000.0
+        try:
+            root_count = len(categories.keys()) if isinstance(categories, dict) else 0
+        except Exception:
+            root_count = 0
+        cprint(f'[TREE]\tCategory reload end ({elapsed_ms:.1f} ms, roots={root_count})')
     else:
         categories = category_data.get('CATEGORIES', {})
 
@@ -123,9 +145,17 @@ def build_stock_location_tree(reload=False, location=None) -> dict:
         return
 
     if reload:
+        start_ts = time.perf_counter()
+        cprint('[TREE]\tStock location reload start')
         stock_locations = inventree_api.get_stock_locations()
         locations_data.update({'STOCK_LOCATIONS': stock_locations})
         config_interface.dump_file(locations_data, settings.CONFIG_STOCK_LOCATIONS)
+        elapsed_ms = (time.perf_counter() - start_ts) * 1000.0
+        try:
+            root_count = len(stock_locations.keys()) if isinstance(stock_locations, dict) else 0
+        except Exception:
+            root_count = 0
+        cprint(f'[TREE]\tStock location reload end ({elapsed_ms:.1f} ms, roots={root_count})')
     else:
         stock_locations = locations_data.get('STOCK_LOCATIONS', {})
 

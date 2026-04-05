@@ -86,6 +86,7 @@ class ExistingPartScanRow:
         self.status = 'Checking...'
         self.part_pk: Optional[int] = None
         self.part_name = ''
+        self.default_location_pk = 0
         self.location = ''
         self.has_barcode = False
         self.current_barcodes: List[str] = []
@@ -592,8 +593,12 @@ class BarcodeImportView(MainView):
 
     def _connect_server_with_retries(self, attempts: int = 3, delay_seconds: float = 1.5) -> bool:
         """Try connecting to InvenTree multiple times before failing."""
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if api_obj and getattr(api_obj, 'token', None) and getattr(api_obj, 'base_url', None):
+            return True
+
         for attempt in range(1, attempts + 1):
-            if inventree_interface.connect_to_server():
+            if inventree_interface.connect_to_server(force_reconnect=(attempt > 1)):
                 return True
             if attempt < attempts:
                 self._show_status(
@@ -825,6 +830,13 @@ class BarcodeAssignmentView(MainView):
         self.scanned_rows: List[ExistingPartScanRow] = []
         self._row_counter = 0
         self._rows_lock = threading.Lock()
+        # Reuse one HTTP session and cache repeated API lookups for faster scans.
+        self._http = requests.Session()
+        self._part_lookup_cache: Dict[str, Optional[Dict]] = {}
+        self._location_name_cache: Dict[int, str] = {}
+        self._location_path_map_loaded = False
+        self._part_barcodes_cache: Dict[int, List[str]] = {}
+        self._barcode_endpoint_available: Optional[bool] = None
         super().__init__(page=page)
         self.build_page()
 
@@ -974,12 +986,16 @@ class BarcodeAssignmentView(MainView):
             row: Optional[ExistingPartScanRow] = None,
     ) -> bool:
         """Try connecting to InvenTree multiple times before failing."""
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if api_obj and getattr(api_obj, 'token', None) and getattr(api_obj, 'base_url', None):
+            return True
+
         for attempt in range(1, attempts + 1):
             if row is not None:
                 row.status = f'Checking server ({attempt}/{attempts})...'
                 self._update_results_table()
 
-            if inventree_interface.connect_to_server():
+            if inventree_interface.connect_to_server(force_reconnect=(attempt > 1)):
                 return True
 
             if attempt < attempts:
@@ -995,9 +1011,9 @@ class BarcodeAssignmentView(MainView):
 
         return False
 
-    def _load_locations(self):
+    def _load_locations(self, reload: bool = False):
         try:
-            location_list = inventree_interface.build_stock_location_tree(reload=False)
+            location_list = inventree_interface.build_stock_location_tree(reload=reload)
             self.fields['location_select'].options = [ft.dropdown.Option(location) for location in location_list]
 
             # Keep the control explicitly interactive on initial route render.
@@ -1016,7 +1032,7 @@ class BarcodeAssignmentView(MainView):
         if not self._connect_server_with_retries(attempts=3, delay_seconds=1.5):
             self.show_dialog(DialogType.ERROR, 'ERROR: Failed to connect to InvenTree server')
             return
-        self._load_locations()
+        self._load_locations(reload=True)
         self._set_status('Stock locations reloaded', color='green')
 
     def _request_with_retries(
@@ -1031,7 +1047,7 @@ class BarcodeAssignmentView(MainView):
         """Run HTTP request with retry on transient/network failures."""
         for attempt in range(1, attempts + 1):
             try:
-                response = requests.request(method=method.upper(), url=url, **kwargs)
+                response = self._http.request(method=method.upper(), url=url, **kwargs)
                 # Retry transient upstream failures and rate limits.
                 if response.status_code == 429 or response.status_code >= 500:
                     raise requests.HTTPError(f'HTTP {response.status_code}', response=response)
@@ -1157,6 +1173,10 @@ class BarcodeAssignmentView(MainView):
             else:
                 row.part_pk = int(part.get('pk') or part.get('id'))
                 row.part_name = str(part.get('name') or part.get('IPN') or row.lookup_value)
+                try:
+                    row.default_location_pk = int(part.get('default_location') or 0)
+                except Exception:
+                    row.default_location_pk = 0
                 full_location = self._resolve_location_string(part)
                 row.location = self._location_leaf(full_location)
 
@@ -1188,13 +1208,19 @@ class BarcodeAssignmentView(MainView):
         self._update_results_table()
 
     def _find_part_by_lookup(self, lookup_value: str) -> Optional[Dict]:
+        cache_key = str(lookup_value or '').strip().lower()
+        if cache_key in self._part_lookup_cache:
+            return self._part_lookup_cache[cache_key]
+
         api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
         if not api_obj:
+            self._part_lookup_cache[cache_key] = None
             return None
 
         token = getattr(api_obj, 'token', None)
         base_url = getattr(api_obj, 'base_url', '')
         if not token or not base_url:
+            self._part_lookup_cache[cache_key] = None
             return None
 
         endpoint = f"{base_url.rstrip('/')}/api/part/"
@@ -1206,10 +1232,11 @@ class BarcodeAssignmentView(MainView):
             method='GET',
             url=endpoint,
             headers=headers,
-            params={'search': lookup_value, 'limit': 20},
+            params={'search': lookup_value, 'limit': 5},
             timeout=20,
         )
         if response is None:
+            self._part_lookup_cache[cache_key] = None
             return None
         payload = response.json()
 
@@ -1221,6 +1248,7 @@ class BarcodeAssignmentView(MainView):
             rows = []
 
         if not rows:
+            self._part_lookup_cache[cache_key] = None
             return None
 
         needle = lookup_value.strip().lower()
@@ -1228,9 +1256,109 @@ class BarcodeAssignmentView(MainView):
             ipn = str(candidate.get('IPN') or '').strip().lower()
             name = str(candidate.get('name') or '').strip().lower()
             if needle and (needle == ipn or needle == name):
+                self._part_lookup_cache[cache_key] = candidate
                 return candidate
 
+        self._part_lookup_cache[cache_key] = rows[0]
         return rows[0]
+
+    def _ensure_location_path_cache(self):
+        """Load full stock-location id->path map once to avoid per-row tree API calls."""
+        if self._location_path_map_loaded:
+            return
+        self._location_path_map_loaded = True
+
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if not api_obj:
+            return
+
+        token = getattr(api_obj, 'token', None)
+        base_url = getattr(api_obj, 'base_url', '')
+        if not token or not base_url:
+            return
+
+        endpoint = f"{base_url.rstrip('/')}/api/stock/location/"
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+
+        items: List[Dict] = []
+        next_url = endpoint
+        next_params = {'limit': 250}
+
+        while next_url:
+            response = self._request_with_retries(
+                method='GET',
+                url=next_url,
+                headers=headers,
+                params=next_params,
+                timeout=20,
+            )
+            if response is None:
+                break
+
+            payload = response.json()
+            if isinstance(payload, dict):
+                rows = payload.get('results') or []
+                next_url = payload.get('next')
+                next_params = {}
+            elif isinstance(payload, list):
+                rows = payload
+                next_url = None
+            else:
+                rows = []
+                next_url = None
+
+            for row in rows:
+                if isinstance(row, dict):
+                    items.append(row)
+
+        if not items:
+            return
+
+        node_name: Dict[int, str] = {}
+        node_parent: Dict[int, Optional[int]] = {}
+        for item in items:
+            try:
+                item_pk = int(item.get('pk') or item.get('id'))
+            except Exception:
+                continue
+
+            name = str(item.get('name') or '').strip()
+            parent_val = item.get('parent')
+            parent_pk = None
+            try:
+                if parent_val not in [None, '', 'None']:
+                    parent_pk = int(parent_val)
+            except Exception:
+                parent_pk = None
+
+            node_name[item_pk] = name
+            node_parent[item_pk] = parent_pk
+
+        visited_cache: Dict[int, str] = {}
+
+        def build_path(pk: int) -> str:
+            if pk in visited_cache:
+                return visited_cache[pk]
+
+            names: List[str] = []
+            seen: set = set()
+            cur = pk
+            while cur and cur not in seen:
+                seen.add(cur)
+                cur_name = node_name.get(cur, '')
+                if cur_name:
+                    names.append(cur_name)
+                cur = node_parent.get(cur)
+
+            path = '/'.join(reversed(names)) if names else str(pk)
+            visited_cache[pk] = path
+            return path
+
+        for loc_pk in node_name.keys():
+            self._location_name_cache[loc_pk] = build_path(loc_pk)
 
     def _resolve_location_string(self, part: Dict) -> str:
         """Resolve location display string from part payload (name or id)."""
@@ -1247,19 +1375,37 @@ class BarcodeAssignmentView(MainView):
         except (TypeError, ValueError):
             return str(location_id)
 
+        cached_location = self._location_name_cache.get(location_id)
+        if cached_location is not None:
+            return cached_location
+
+        # Prefer one-time location map load (single API sweep) over per-row tree calls.
+        self._ensure_location_path_cache()
+        cached_location = self._location_name_cache.get(location_id)
+        if cached_location is not None:
+            return cached_location
+
         try:
             location_tree = inventree_interface.inventree_api.get_stock_location_tree(location_id)
             # API helper returns leaf->root insertion order, so reverse for root->leaf
             names = [str(name) for name in reversed(list(location_tree.values())) if str(name).strip()]
             if names:
-                return '/'.join(names)
+                resolved = '/'.join(names)
+                self._location_name_cache[location_id] = resolved
+                return resolved
         except Exception:
             pass
 
-        return str(location_id)
+        fallback = str(location_id)
+        self._location_name_cache[location_id] = fallback
+        return fallback
 
     def _fetch_part_barcodes(self, part_pk: int) -> List[str]:
         """Fetch current external barcode values for a part via /api/barcode/."""
+        cached_values = self._part_barcodes_cache.get(int(part_pk))
+        if cached_values is not None:
+            return list(cached_values)
+
         api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
         if not api_obj:
             return []
@@ -1274,6 +1420,23 @@ class BarcodeAssignmentView(MainView):
             'Authorization': f'Token {token}',
             'Accept': 'application/json',
         }
+
+        # Probe endpoint only once: some server versions disable GET /api/barcode/.
+        if self._barcode_endpoint_available is None:
+            try:
+                probe_response = self._http.get(
+                    endpoint,
+                    headers=headers,
+                    params={'limit': 1},
+                    timeout=6,
+                )
+                self._barcode_endpoint_available = probe_response.status_code not in [404, 405]
+            except Exception:
+                self._barcode_endpoint_available = False
+
+        if not self._barcode_endpoint_available:
+            self._part_barcodes_cache[int(part_pk)] = []
+            return []
 
         def _extract_values(payload) -> List[str]:
             if isinstance(payload, dict):
@@ -1303,9 +1466,11 @@ class BarcodeAssignmentView(MainView):
                 timeout=20,
             )
             if response is None:
+                self._part_barcodes_cache[int(part_pk)] = []
                 return []
             values = _extract_values(response.json())
             if values:
+                self._part_barcodes_cache[int(part_pk)] = list(values)
                 return values
         except Exception:
             pass
@@ -1320,6 +1485,7 @@ class BarcodeAssignmentView(MainView):
                 timeout=20,
             )
             if response is None:
+                self._part_barcodes_cache[int(part_pk)] = []
                 return []
             payload = response.json()
             if isinstance(payload, dict):
@@ -1349,8 +1515,10 @@ class BarcodeAssignmentView(MainView):
                 barcode_value = item.get('data') or item.get('barcode') or item.get('value')
                 if barcode_value:
                     values.append(str(barcode_value))
+            self._part_barcodes_cache[int(part_pk)] = list(values)
             return values
         except Exception:
+            self._part_barcodes_cache[int(part_pk)] = []
             return []
 
     def _generate_part_barcode(self, part_pk: int) -> str:
@@ -1411,7 +1579,7 @@ class BarcodeAssignmentView(MainView):
 
         try:
             url = f"{base_url.rstrip('/')}/api/stock/"
-            params = {'part': part_pk, 'limit': 100}
+            params = {'part': part_pk, 'limit': 250}
 
             while url:
                 response = self._request_with_retries(
@@ -1440,6 +1608,14 @@ class BarcodeAssignmentView(MainView):
                     if not item_pk:
                         continue
 
+                    current_loc = item.get('location')
+                    try:
+                        if current_loc is not None and int(current_loc) == int(location_pk):
+                            # No-op: already assigned to requested location.
+                            continue
+                    except Exception:
+                        pass
+
                     patch_url = f"{base_url.rstrip('/')}/api/stock/{item_pk}/"
                     patch_resp = self._request_with_retries(
                         method='PATCH',
@@ -1460,6 +1636,67 @@ class BarcodeAssignmentView(MainView):
             return updated, failed, ''
         except Exception as exc:
             return updated, failed, str(exc)
+
+    def _set_part_default_location(self, part_pk: int, location_pk: int) -> bool:
+        """Set part default location using direct API patch with retries."""
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if not api_obj:
+            return False
+
+        token = getattr(api_obj, 'token', None)
+        base_url = getattr(api_obj, 'base_url', '')
+        if not token or not base_url:
+            return False
+
+        endpoint = f"{base_url.rstrip('/')}/api/part/{int(part_pk)}/"
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+
+        response = self._request_with_retries(
+            method='PATCH',
+            url=endpoint,
+            headers=headers,
+            json={'default_location': int(location_pk)},
+            timeout=20,
+        )
+        return response is not None and response.status_code in [200, 202]
+
+    def _link_part_barcode(self, part_pk: int, barcode_value: str) -> bool:
+        """Link barcode to part using direct API call with retries."""
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if not api_obj:
+            return False
+
+        token = getattr(api_obj, 'token', None)
+        base_url = getattr(api_obj, 'base_url', '')
+        if not token or not base_url:
+            return False
+
+        endpoint = f"{base_url.rstrip('/')}/api/barcode/link/"
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+
+        payload = {
+            'barcode': str(barcode_value or '').strip(),
+            'part': int(part_pk),
+        }
+        if not payload['barcode']:
+            return False
+
+        response = self._request_with_retries(
+            method='POST',
+            url=endpoint,
+            headers=headers,
+            json=payload,
+            timeout=20,
+        )
+        return response is not None and response.status_code in [200, 201, 202]
 
     @staticmethod
     def _location_leaf(location: str) -> str:
@@ -1568,9 +1805,15 @@ class BarcodeAssignmentView(MainView):
             row_ok = True
             try:
                 if apply_location:
-                    inventree_interface.inventree_api.set_part_default_location(row.part_pk, location_pk)
+                    if int(row.default_location_pk or 0) != int(location_pk):
+                        set_ok = self._set_part_default_location(row.part_pk, location_pk)
+                        if not set_ok:
+                            row_ok = False
+                            failures.append(f'{row.part_name}: default location update failed')
+                        else:
+                            row.default_location_pk = int(location_pk)
 
-                    if apply_stock_items_location:
+                    if apply_stock_items_location and row_ok:
                         updated, stock_failed, stock_error = self._update_all_stock_items_location(
                             part_pk=row.part_pk,
                             location_pk=location_pk,
@@ -1587,7 +1830,7 @@ class BarcodeAssignmentView(MainView):
                         # Respect existing barcode unless explicitly forced.
                         pass
                     else:
-                        barcode_ok = inventree_interface.inventree_api.link_barcode(row.part_name, part_pk=row.part_pk)
+                        barcode_ok = self._link_part_barcode(row.part_pk, row.part_name)
                         if not barcode_ok:
                             row_ok = False
                             failures.append(f'{row.part_name}: barcode reassignment failed')
