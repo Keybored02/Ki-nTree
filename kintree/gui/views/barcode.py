@@ -129,6 +129,9 @@ class BarcodeImportView(MainView):
         self.scanned_rows: List[BarcodeScannedRow] = []
         self.categories = {}
         self.stock_locations = {}
+        self._last_scan_code = ''
+        self._last_scan_ts = 0.0
+        self._recent_scan_codes: Dict[str, float] = {}
 
         # Call parent init
         super().__init__(page=page)
@@ -458,14 +461,28 @@ class BarcodeImportView(MainView):
 
     def _append_parsed_barcode(self, barcode: str, update_table: bool = True, update_status: bool = True) -> bool:
         """Parse and append one barcode row without removing existing entries."""
-        parsed = self.parser.parse(barcode)
+        normalized = str(barcode or '').strip()
+        if not normalized:
+            return False
+
+        now = time.monotonic()
+        recent_ts = self._recent_scan_codes.get(normalized)
+        if recent_ts is not None and (now - recent_ts) < 0.5:
+            cprint(f'[BARCODE]\tIgnored duplicate scan: {normalized}', silent=False)
+            return False
+
+        self._recent_scan_codes[normalized] = now
+        self._last_scan_code = normalized
+        self._last_scan_ts = now
+
+        parsed = self.parser.parse(normalized)
         if parsed.get('supplier') == 'unknown':
             if update_status:
                 self._show_status('Unknown barcode format', color='red')
                 self.show_dialog(DialogType.ERROR, 'Unrecognized barcode format')
             return False
 
-        row = BarcodeScannedRow(barcode, parsed)
+        row = BarcodeScannedRow(normalized, parsed)
         self.scanned_rows.append(row)
         if update_table:
             self._update_results_table()
@@ -565,6 +582,7 @@ class BarcodeImportView(MainView):
         if not self.scanned_rows:
             return
         self.scanned_rows.clear()
+        self._recent_scan_codes.clear()
         self._update_results_table()
         self._show_status('Cleared all scanned items', color='blue')
     
@@ -845,6 +863,9 @@ class BarcodeAssignmentView(MainView):
         self.scanned_rows: List[ExistingPartScanRow] = []
         self._row_counter = 0
         self._rows_lock = threading.Lock()
+        self._last_scan_code = ''
+        self._last_scan_ts = 0.0
+        self._recent_scan_codes: Dict[str, float] = {}
         # Reuse one HTTP session and cache repeated API lookups for faster scans.
         self._http = requests.Session()
         self._part_lookup_cache: Dict[str, Optional[Dict]] = {}
@@ -1104,6 +1125,7 @@ class BarcodeAssignmentView(MainView):
         text = (self.fields['barcode_input'].value or '').strip()
         if not text:
             return
+
         if self._enqueue_code(text):
             self.fields['barcode_input'].value = ''
             self.fields['barcode_input'].update()
@@ -1148,6 +1170,16 @@ class BarcodeAssignmentView(MainView):
         code = str(raw_code or '').strip()
         if not code:
             return False
+
+        now = time.monotonic()
+        recent_ts = self._recent_scan_codes.get(code)
+        if recent_ts is not None and (now - recent_ts) < 0.5:
+            cprint(f'[ASSIGN]\tIgnored duplicate scan: {code}', silent=False)
+            return False
+
+        self._recent_scan_codes[code] = now
+        self._last_scan_code = code
+        self._last_scan_ts = now
 
         parsed = self.parser.parse(code)
         supplier = parsed.get('supplier', 'unknown')
@@ -1740,6 +1772,7 @@ class BarcodeAssignmentView(MainView):
             if not self.scanned_rows:
                 return
             self.scanned_rows.clear()
+            self._recent_scan_codes.clear()
         self._update_results_table()
         self._set_status('Cleared all queued items', color='blue')
 
