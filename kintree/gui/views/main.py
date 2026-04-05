@@ -66,6 +66,10 @@ MAIN_NAVIGATION = {
         'nav_index': 4,
         'route': '/main/barcode'
     },
+    'Assign': {
+        'nav_index': 5,
+        'route': '/main/assign'
+    },
 }
 
 # Load navigation indexes
@@ -109,6 +113,12 @@ main_navrail = ft.NavigationRail(
             icon_content=ft.Icon(name=ft.icons.QR_CODE_2_OUTLINED, size=40),
             selected_icon_content=ft.Icon(name=ft.icons.QR_CODE_2, size=40),
             label_content=ft.Text("Barcode", size=16),
+            padding=10,
+        ),
+        ft.NavigationRailDestination(
+            icon_content=ft.Icon(name=ft.icons.EDIT_LOCATION_ALT_OUTLINED, size=40),
+            selected_icon_content=ft.Icon(name=ft.icons.EDIT_LOCATION_ALT, size=40),
+            label_content=ft.Text("Assign", size=16),
             padding=10,
         ),
     ],

@@ -10,7 +10,7 @@ from .views.main import (
     KicadView,
     CreateView,
 )
-from .views.barcode import BarcodeImportView
+from .views.barcode import BarcodeImportView, BarcodeAssignmentView
 from .views.settings import (
     UserSettingsView,
     SupplierSettingsView,
@@ -51,6 +51,7 @@ def kintree_gui(page: ft.Page):
     kicad_view = KicadView(page)
     create_view = CreateView(page)
     barcode_view = BarcodeImportView(page)
+    assign_view = BarcodeAssignmentView(page)
     # Create settings views
     user_settings_view = UserSettingsView(page)
     supplier_settings_view = SupplierSettingsView(page)
@@ -70,6 +71,8 @@ def kintree_gui(page: ft.Page):
                 page.views.append(kicad_view)
             elif 'create' in page.route:
                 page.views.append(create_view)
+            elif 'assign' in page.route:
+                page.views.append(assign_view)
             elif 'barcode' in page.route:
                 page.views.append(barcode_view)
         elif '/settings' in page.route:
@@ -88,6 +91,8 @@ def kintree_gui(page: ft.Page):
         page.update()
         if '/main/barcode' in page.route:
             barcode_view.focus_barcode_input()
+        if '/main/assign' in page.route:
+            assign_view.focus_input()
 
     def view_pop(view):
         '''Pop setting view'''
