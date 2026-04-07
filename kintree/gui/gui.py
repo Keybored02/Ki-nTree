@@ -11,6 +11,7 @@ from .views.main import (
     CreateView,
 )
 from .views.barcode import BarcodeImportView
+from .views.locations import LocationsView
 from .views.settings import (
     UserSettingsView,
     SupplierSettingsView,
@@ -72,6 +73,7 @@ def kintree_gui(page: ft.Page):
         'kicad': None,
         'create': None,
         'barcode': None,
+        'locations': None,
     }
     settings_views = {
         'user': None,
@@ -91,6 +93,8 @@ def kintree_gui(page: ft.Page):
             main_views['create'] = CreateView(page)
         elif key == 'barcode' and main_views['barcode'] is None:
             main_views['barcode'] = BarcodeImportView(page)
+        elif key == 'locations' and main_views['locations'] is None:
+            main_views['locations'] = LocationsView(page)
         return main_views[key]
 
     def get_settings_view(key: str):
@@ -123,6 +127,8 @@ def kintree_gui(page: ft.Page):
                 page.views.append(get_main_view('create'))
             elif 'barcode' in current_route:
                 page.views.append(get_main_view('barcode'))
+            elif 'locations' in current_route:
+                page.views.append(get_main_view('locations'))
         elif '/settings' in current_route:
             if page.views and '/settings' in page.views[-1].route:
                 page.views.pop()
@@ -140,6 +146,8 @@ def kintree_gui(page: ft.Page):
         _stabilize_layout(page)
         if '/main/barcode' in current_route:
             main_views['barcode'].focus_barcode_input()
+        if '/main/locations' in current_route:
+            main_views['locations'].focus_input()
 
     def view_pop(view):
         '''Pop setting view'''
