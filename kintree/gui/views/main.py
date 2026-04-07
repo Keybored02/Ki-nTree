@@ -1,5 +1,7 @@
 import os
 import copy
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from importlib import import_module
 import flet as ft
 
@@ -607,7 +609,7 @@ class InventreeView(MainView):
             disabled=not settings.ENABLE_INVENTREE,
         ),
         'Stock location': DropdownWithSearch(
-            label='Stock Location',
+            label='Stock Location (optional)',
             disabled=not settings.ENABLE_INVENTREE,
             dr_width=GUI_PARAMS['textfield_width'],
             sr_width=GUI_PARAMS['searchfield_width'],
@@ -1318,6 +1320,36 @@ class CreateView(MainView):
     create_continue = True
     bulk_picker = None
 
+    def __init__(self, page: ft.Page):
+        self._stock_location_id_map = {}
+        self._stock_location_pk_cache = {}
+        super().__init__(page)
+
+    def _resolve_stock_location_pk(self, location_value) -> int:
+        if not location_value:
+            return -1
+
+        if isinstance(location_value, list):
+            normalized_location = '/'.join(str(segment).strip() for segment in location_value if str(segment).strip())
+        else:
+            normalized_location = str(location_value).strip()
+
+        if not normalized_location:
+            return -1
+
+        if normalized_location in self._stock_location_pk_cache:
+            return int(self._stock_location_pk_cache[normalized_location])
+
+        if not self._stock_location_id_map:
+            self._stock_location_id_map = inventree_interface.get_stock_location_id_map() or {}
+
+        location_pk = inventree_interface.resolve_stock_location_pk(
+            normalized_location,
+            self._stock_location_id_map,
+        )
+        self._stock_location_pk_cache[normalized_location] = int(location_pk)
+        return int(location_pk)
+
     @staticmethod
     def _normalize_header(value):
         if value is None:
@@ -1552,6 +1584,9 @@ class CreateView(MainView):
             self.show_dialog(DialogType.ERROR, 'ERROR: Failed to connect to InvenTree server')
             return
 
+        self._stock_location_id_map = inventree_interface.get_stock_location_id_map() or {}
+        self._stock_location_pk_cache = {}
+
         self.reset_progress_bars()
         self.enable_create(False)
 
@@ -1573,30 +1608,39 @@ class CreateView(MainView):
             if str(code).strip()
         }
 
-        for idx, row in enumerate(rows, start=1):
+        location_map = dict(self._stock_location_id_map or {})
+
+        def _process_bulk_row(idx: int, row_data: dict) -> dict:
+            row_start_ts = time.perf_counter()
+            result = {
+                'idx': idx,
+                'row': row_data,
+                'ok': False,
+                'part_pk': 0,
+                'failure': '',
+            }
+
             if not self.create_continue:
-                self.enable_create(True)
-                return self.process_cancel()
+                result['failure'] = 'Cancelled'
+                return result
 
             cprint(
-                f"[BULK]\tProcessing row {idx}/{total} | search='{row['search_name']}' | supplier='{row['supplier']}'",
+                f"[BULK]\tProcessing row {idx}/{total} | search='{row_data['search_name']}' | supplier='{row_data['supplier']}'",
                 silent=settings.SILENT,
             )
 
-            supplier_name = self._resolve_bulk_supplier_key(row['supplier'])
+            supplier_name = self._resolve_bulk_supplier_key(row_data['supplier'])
             if not supplier_name:
-                failed += 1
-                failures.append(f"Row {row['excel_row']}: unknown supplier '{row['supplier']}'")
-                continue
+                result['failure'] = f"Row {row_data['excel_row']}: unknown supplier '{row_data['supplier']}'"
+                return result
 
             supplier_data = inventree_interface.supplier_search(
                 supplier=supplier_name,
-                part_number=row['search_name'],
+                part_number=row_data['search_name'],
             )
             if not supplier_data:
-                failed += 1
-                failures.append(f"Row {row['excel_row']}: supplier search failed for '{row['search_name']}'")
-                continue
+                result['failure'] = f"Row {row_data['excel_row']}: supplier search failed for '{row_data['search_name']}'"
+                return result
 
             part_form = inventree_interface.translate_supplier_to_form(
                 supplier=supplier_name,
@@ -1604,64 +1648,65 @@ class CreateView(MainView):
             )
 
             if not part_form.get('name'):
-                part_form['name'] = row['search_name']
+                part_form['name'] = row_data['search_name']
             if not part_form.get('description'):
-                part_form['description'] = row['search_name']
+                part_form['description'] = row_data['search_name']
 
             part_form['category_tree'] = [
                 segment.strip()
-                for segment in inventree_interface.split_category_tree(row['inventree_category'])
+                for segment in inventree_interface.split_category_tree(row_data['inventree_category'])
                 if str(segment).strip()
             ]
 
             if settings.CONFIG_IPN.get('IPN_CATEGORY_CODE', False):
-                ipn_code = str(row.get('ipn', '') or '').strip()
+                ipn_code = str(row_data.get('ipn', '') or '').strip()
                 if ipn_code:
                     part_form['category_code'] = ipn_code
                     if ipn_code in existing_category_codes:
-                        cprint(f"[BULK]\tRow {row['excel_row']}: using existing category code '{ipn_code}'", silent=settings.SILENT)
+                        cprint(f"[BULK]\tRow {row_data['excel_row']}: using existing category code '{ipn_code}'", silent=settings.SILENT)
                     else:
-                        cprint(f"[BULK]\tRow {row['excel_row']}: using new category code '{ipn_code}'", silent=settings.SILENT)
+                        cprint(f"[BULK]\tRow {row_data['excel_row']}: using new category code '{ipn_code}'", silent=settings.SILENT)
                 else:
                     if inv_data.get('Create New Code', False):
                         part_form['category_code'] = inv_data.get('New Category Code', '')
                     else:
                         part_form['category_code'] = inv_data.get('IPN: Category Code', '')
 
-            location_text = str(row.get('location', '') or '').strip()
+            location_text = str(row_data.get('location', '') or '').strip()
             if not location_text:
                 location_text = inv_data.get('Stock location', '')
 
             location_tree = self._normalize_location_tree(location_text)
 
             create_stock_enabled = bool(inv_data.get('Create stock', False))
-            if row.get('create_stock') is not None:
-                create_stock_enabled = bool(row.get('create_stock'))
+            if row_data.get('create_stock') is not None:
+                create_stock_enabled = bool(row_data.get('create_stock'))
 
-            stock_quantity = str(row.get('stock_quantity', '') or '').strip()
+            stock_quantity = str(row_data.get('stock_quantity', '') or '').strip()
             if not stock_quantity:
                 stock_quantity = inv_data.get('Stock quantity', '1')
 
             make_default = inv_data.get('Make stock location default', False)
-            if row.get('make_default') is not None:
-                make_default = bool(row.get('make_default'))
+            if row_data.get('make_default') is not None:
+                make_default = bool(row_data.get('make_default'))
 
             stock_payload = None
             if create_stock_enabled and not location_tree:
-                failed += 1
-                failures.append(
-                    f"Row {row['excel_row']}: create_stock is enabled but no stock location provided"
-                )
-                continue
+                result['failure'] = f"Row {row_data['excel_row']}: create_stock is enabled but no stock location provided"
+                return result
 
             if create_stock_enabled and location_tree:
-                location_pk = inventree_interface.get_inventree_stock_location_id(location_tree)
+                ts_loc_resolve = time.perf_counter()
+                normalized_location = '/'.join(str(segment).strip() for segment in location_tree if str(segment).strip())
+                location_pk = inventree_interface.resolve_stock_location_pk(normalized_location, location_map)
+                elapsed_loc_resolve = (time.perf_counter() - ts_loc_resolve) * 1000.0
+                cprint(f"[BULK]\tRow {row_data['excel_row']}: location resolve ({elapsed_loc_resolve:.1f} ms)", silent=settings.SILENT)
                 if location_pk <= 0:
-                    failed += 1
-                    failures.append(
-                        f"Row {row['excel_row']}: stock location not found '{row.get('location') or inv_data.get('Stock location', '')}'"
+                    result['failure'] = (
+                        f"Row {row_data['excel_row']}: stock location not found "
+                        f"'{row_data.get('location') or inv_data.get('Stock location', '')}'"
                     )
-                    continue
+                    return result
 
                 stock_payload = {
                     'location': location_pk,
@@ -1677,33 +1722,64 @@ class CreateView(MainView):
                 stock=stock_payload,
             )
 
-            if part_pk:
-                barcode_value = str(row.get('barcode', '') or '').strip()
-                if not barcode_value:
-                    barcode_value = str(inv_data.get('Part barcode', '') or '').strip()
+            elapsed_row = (time.perf_counter() - row_start_ts) * 1000.0
+            cprint(f"[BULK]\tRow {row_data['excel_row']} total: {elapsed_row:.1f} ms", silent=settings.SILENT)
 
-                self._post_process_part(
-                    part_pk=part_pk,
-                    location_tree=location_tree,
-                    create_stock_enabled=create_stock_enabled,
-                    barcode_value=barcode_value,
+            if not part_pk:
+                result['failure'] = (
+                    f"Row {row_data['excel_row']}: failed to create '{row_data['search_name']}' "
+                    f"in category '{row_data['inventree_category']}'"
                 )
+                return result
 
-                success += 1
-                cprint(
-                    f"[BULK]\tRow {row['excel_row']} created successfully (part_pk={part_pk})",
-                    silent=settings.SILENT,
-                )
-            else:
-                failed += 1
-                failures.append(
-                    f"Row {row['excel_row']}: failed to create '{row['search_name']}' in category '{row['inventree_category']}'"
-                )
+            barcode_value = str(row_data.get('barcode', '') or '').strip()
+            if not barcode_value:
+                barcode_value = str(inv_data.get('Part barcode', '') or '').strip()
 
-            self.fields['inventree_progress'].value = idx / total
-            self.fields['bulk_status'].value = f'Processing row {idx}/{total} | success={success} failed={failed}'
-            self.fields['inventree_progress'].update()
-            self.fields['bulk_status'].update()
+            self._post_process_part(
+                part_pk=part_pk,
+                location_tree=location_tree,
+                create_stock_enabled=create_stock_enabled,
+                barcode_value=barcode_value,
+            )
+
+            result['ok'] = True
+            result['part_pk'] = int(part_pk)
+            return result
+
+        max_workers = min(4, max(1, total))
+        cprint(f"[BULK]\tParallel row workers: {max_workers}", silent=settings.SILENT)
+
+        completed = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(_process_bulk_row, idx, row): (idx, row)
+                for idx, row in enumerate(rows, start=1)
+            }
+
+            for future in as_completed(future_map):
+                if not self.create_continue:
+                    self.enable_create(True)
+                    return self.process_cancel()
+
+                result = future.result()
+                row = result['row']
+                if result['ok']:
+                    success += 1
+                    cprint(
+                        f"[BULK]\tRow {row['excel_row']} created successfully (part_pk={result['part_pk']})",
+                        silent=settings.SILENT,
+                    )
+                else:
+                    if result['failure'] and result['failure'] != 'Cancelled':
+                        failed += 1
+                        failures.append(result['failure'])
+
+                completed += 1
+                self.fields['inventree_progress'].value = completed / total
+                self.fields['bulk_status'].value = f'Processing row {completed}/{total} | success={success} failed={failed}'
+                self.fields['inventree_progress'].update()
+                self.fields['bulk_status'].update()
 
         self.fields['inventree_progress'].value = 1.0
         if failed == 0:
@@ -1800,6 +1876,7 @@ class CreateView(MainView):
         self.fields['create'].update()
         
     def create_part(self, e=None):
+        create_start_ts = time.perf_counter()
         self.reset_progress_bars()
 
         if not settings.ENABLE_INVENTREE and not settings.ENABLE_KICAD:
@@ -1873,9 +1950,21 @@ class CreateView(MainView):
                 self.show_dialog(DialogType.ERROR, 'Missing InvenTree Data')
                 return
             # Check connection
+            ts_connect = time.perf_counter()
             if not inventree_interface.connect_to_server():
                 self.show_dialog(DialogType.ERROR, 'ERROR: Failed to connect to InvenTree server')
                 return
+            elapsed_connect = (time.perf_counter() - ts_connect) * 1000.0
+            cprint(f'[MAIN]\tCreate InvenTree connect: {elapsed_connect:.1f} ms', silent=settings.SILENT)
+
+            if not self._stock_location_id_map:
+                ts_map_prefetch = time.perf_counter()
+                self._stock_location_id_map = inventree_interface.get_stock_location_id_map() or {}
+                elapsed_map_prefetch = (time.perf_counter() - ts_map_prefetch) * 1000.0
+                cprint(
+                    f"[MAIN]\tCreate stock location map prefetch: {len(self._stock_location_id_map)} entries ({elapsed_map_prefetch:.1f} ms)",
+                    silent=settings.SILENT,
+                )
             
             if settings.ENABLE_ALTERNATE:
                 # Check mandatory data
@@ -1918,18 +2007,19 @@ class CreateView(MainView):
                 stock = None
                 if data_from_views['InvenTree'].get('Create stock'):
                     stock_tree = data_from_views['InvenTree'].get('Stock location', None)
-                    if not stock_tree:
-                        # Check category is present
-                        self.show_dialog(DialogType.ERROR, 'Missing InvenTree Stock location')
-                        return
-
-                    stock = {
-                        'location': inventree_interface.get_inventree_stock_location_id(data_from_views['InvenTree'].get('Stock location')),
-                        'quantity': data_from_views['InvenTree'].get('Stock quantity'),
-                        'make_default': data_from_views['InvenTree'].get('Make stock location default'),
-                    }
+                    if stock_tree:
+                        ts_loc_resolve = time.perf_counter()
+                        location_pk = self._resolve_stock_location_pk(stock_tree)
+                        elapsed_loc_resolve = (time.perf_counter() - ts_loc_resolve) * 1000.0
+                        cprint(f'[MAIN]\tCreate stock location resolve: {elapsed_loc_resolve:.1f} ms', silent=settings.SILENT)
+                        stock = {
+                            'location': location_pk,
+                            'quantity': data_from_views['InvenTree'].get('Stock quantity'),
+                            'make_default': data_from_views['InvenTree'].get('Make stock location default'),
+                        }
 
                 # Create new part
+                ts_create = time.perf_counter()
                 new_part, part_pk, part_info = inventree_interface.inventree_create(
                     part_info=part_info,
                     kicad=settings.ENABLE_KICAD,
@@ -1939,6 +2029,8 @@ class CreateView(MainView):
                     is_custom=custom,
                     stock=stock,
                 )
+                elapsed_create = (time.perf_counter() - ts_create) * 1000.0
+                cprint(f'[MAIN]\tCreate inventree_create: {elapsed_create:.1f} ms', silent=settings.SILENT)
                 # print(new_part, part_pk)
                 # cprint(part_info)
 
@@ -1964,6 +2056,9 @@ class CreateView(MainView):
                         create_stock_enabled=bool(data_from_views['InvenTree'].get('Create stock')),
                         barcode_value=barcode,
                     )
+
+                    elapsed_total = (time.perf_counter() - create_start_ts) * 1000.0
+                    cprint(f'[MAIN]\tCreate total: {elapsed_total:.1f} ms', silent=settings.SILENT)
 
                     # Update symbol
                     if symbol:

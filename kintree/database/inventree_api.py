@@ -25,6 +25,136 @@ from inventree.stock import StockItem
 from inventree.base import ParameterTemplate, Parameter
 
 
+def _to_parent_id(parent_ref):
+    if isinstance(parent_ref, dict):
+        parent_ref = parent_ref.get('pk') or parent_ref.get('id')
+    if parent_ref in [None, '', 0, '0', 'None']:
+        return None
+    try:
+        return int(parent_ref)
+    except Exception:
+        return None
+
+
+def _fetch_stock_location_records() -> list:
+    global inventree_api
+
+    token = getattr(inventree_api, 'token', None)
+    base_url = str(getattr(inventree_api, 'base_url', '') or '').rstrip('/')
+    if not token or not base_url:
+        return []
+
+    headers = {
+        'Authorization': f'Token {token}',
+        'Accept': 'application/json',
+    }
+
+    records = []
+    url = f'{base_url}/api/stock/location/'
+    params = {'limit': 250}
+
+    while url:
+        response = requests.get(url, headers=headers, params=params, timeout=20)
+        response.raise_for_status()
+        payload = response.json()
+
+        if isinstance(payload, dict):
+            rows = payload.get('results') or []
+            next_url = payload.get('next')
+        elif isinstance(payload, list):
+            rows = payload
+            next_url = None
+        else:
+            rows = []
+            next_url = None
+
+        for row in rows:
+            if isinstance(row, dict):
+                records.append(row)
+
+        url = next_url
+        params = {}
+
+    return records
+
+
+def _build_stock_location_tree_from_records(records: list) -> dict:
+    node_name = {}
+    node_parent = {}
+    children = {}
+
+    for row in records:
+        try:
+            node_id = int(row.get('pk') or row.get('id'))
+        except Exception:
+            continue
+
+        node_name[node_id] = str(row.get('name') or '').strip()
+        node_parent[node_id] = _to_parent_id(row.get('parent'))
+        children.setdefault(node_id, [])
+
+    for node_id, parent_id in node_parent.items():
+        if parent_id in children:
+            children[parent_id].append(node_id)
+
+    def build_subtree(node_id: int):
+        child_ids = children.get(node_id, [])
+        if not child_ids:
+            return None
+        subtree = {}
+        for child_id in child_ids:
+            child_name = node_name.get(child_id, '')
+            if not child_name:
+                continue
+            subtree[child_name] = build_subtree(child_id)
+        return subtree if subtree else None
+
+    roots = []
+    for node_id, parent_id in node_parent.items():
+        if parent_id is None or parent_id not in node_name:
+            roots.append(node_id)
+
+    tree = {}
+    for root_id in roots:
+        root_name = node_name.get(root_id, '')
+        if not root_name:
+            continue
+        tree[root_name] = build_subtree(root_id)
+
+    return tree
+
+
+def _build_stock_location_id_map_from_records(records: list) -> dict:
+    node_name = {}
+    node_parent = {}
+
+    for row in records:
+        try:
+            node_id = int(row.get('pk') or row.get('id'))
+        except Exception:
+            continue
+        node_name[node_id] = str(row.get('name') or '').strip()
+        node_parent[node_id] = _to_parent_id(row.get('parent'))
+
+    id_map = {}
+    for node_id, name in node_name.items():
+        if not name:
+            continue
+
+        path = [name]
+        parent_id = node_parent.get(node_id)
+        seen = {node_id}
+
+        while parent_id is not None and parent_id in node_name and parent_id not in seen:
+            seen.add(parent_id)
+            path.insert(0, node_name[parent_id])
+            parent_id = node_parent.get(parent_id)
+
+        id_map['/'.join(path)] = node_id
+
+    return id_map
+
+
 def connect(server: str,
             username: str,
             password: str,
@@ -264,104 +394,10 @@ def get_stock_locations() -> dict:
     '''Fetch InvenTree stock locations'''
     global inventree_api
 
-    def _to_parent_id(parent_ref):
-        if isinstance(parent_ref, dict):
-            parent_ref = parent_ref.get('pk') or parent_ref.get('id')
-        if parent_ref in [None, '', 0, '0', 'None']:
-            return None
-        try:
-            return int(parent_ref)
-        except Exception:
-            return None
-
-    def _fetch_all(endpoint: str) -> list:
-        token = getattr(inventree_api, 'token', None)
-        base_url = str(getattr(inventree_api, 'base_url', '') or '').rstrip('/')
-        if not token or not base_url:
-            return []
-
-        headers = {
-            'Authorization': f'Token {token}',
-            'Accept': 'application/json',
-        }
-
-        records = []
-        url = f'{base_url}{endpoint}'
-        params = {'limit': 250}
-
-        while url:
-            response = requests.get(url, headers=headers, params=params, timeout=20)
-            response.raise_for_status()
-            payload = response.json()
-
-            if isinstance(payload, dict):
-                rows = payload.get('results') or []
-                next_url = payload.get('next')
-            elif isinstance(payload, list):
-                rows = payload
-                next_url = None
-            else:
-                rows = []
-                next_url = None
-
-            for row in rows:
-                if isinstance(row, dict):
-                    records.append(row)
-
-            url = next_url
-            params = {}
-
-        return records
-
-    def _build_tree(records: list) -> dict:
-        node_name = {}
-        node_parent = {}
-        children = {}
-
-        for row in records:
-            try:
-                node_id = int(row.get('pk') or row.get('id'))
-            except Exception:
-                continue
-
-            node_name[node_id] = str(row.get('name') or '').strip()
-            node_parent[node_id] = _to_parent_id(row.get('parent'))
-            children.setdefault(node_id, [])
-
-        for node_id, parent_id in node_parent.items():
-            if parent_id in children:
-                children[parent_id].append(node_id)
-
-        def build_subtree(node_id: int):
-            child_ids = children.get(node_id, [])
-            if not child_ids:
-                return None
-            subtree = {}
-            for child_id in child_ids:
-                child_name = node_name.get(child_id, '')
-                if not child_name:
-                    continue
-                subtree[child_name] = build_subtree(child_id)
-            return subtree if subtree else None
-
-        roots = []
-        for node_id, parent_id in node_parent.items():
-            if parent_id is None or parent_id not in node_name:
-                roots.append(node_id)
-
-        tree = {}
-        for root_id in roots:
-            root_name = node_name.get(root_id, '')
-            if not root_name:
-                continue
-            tree[root_name] = build_subtree(root_id)
-
-        return tree
-
     try:
-        records = _fetch_all('/api/stock/location/')
+        records = _fetch_stock_location_records()
         if records:
-            return _build_tree(records)
+            return _build_stock_location_tree_from_records(records)
     except Exception:
         pass
 
@@ -400,87 +436,14 @@ def get_stock_location_id_map() -> dict:
     '''Fetch a normalized stock location path -> PK map.''' 
     global inventree_api
 
-    def _to_parent_id(parent_ref):
-        if isinstance(parent_ref, dict):
-            parent_ref = parent_ref.get('pk') or parent_ref.get('id')
-        if parent_ref in [None, '', 0, '0', 'None']:
-            return None
-        try:
-            return int(parent_ref)
-        except Exception:
-            return None
-
-    def _fetch_all(endpoint: str) -> list:
-        token = getattr(inventree_api, 'token', None)
-        base_url = str(getattr(inventree_api, 'base_url', '') or '').rstrip('/')
-        if not token or not base_url:
-            return []
-
-        headers = {
-            'Authorization': f'Token {token}',
-            'Accept': 'application/json',
-        }
-
-        records = []
-        url = f'{base_url}{endpoint}'
-        params = {'limit': 250}
-
-        while url:
-            response = requests.get(url, headers=headers, params=params, timeout=20)
-            response.raise_for_status()
-            payload = response.json()
-
-            if isinstance(payload, dict):
-                rows = payload.get('results') or []
-                next_url = payload.get('next')
-            elif isinstance(payload, list):
-                rows = payload
-                next_url = None
-            else:
-                rows = []
-                next_url = None
-
-            for row in rows:
-                if isinstance(row, dict):
-                    records.append(row)
-
-            url = next_url
-            params = {}
-
-        return records
-
     try:
-        records = _fetch_all('/api/stock/location/')
+        records = _fetch_stock_location_records()
+        if records:
+            return _build_stock_location_id_map_from_records(records)
     except Exception:
         return {}
 
-    node_name = {}
-    node_parent = {}
-    for row in records:
-        try:
-            node_id = int(row.get('pk') or row.get('id'))
-        except Exception:
-            continue
-        node_name[node_id] = str(row.get('name') or '').strip()
-        node_parent[node_id] = _to_parent_id(row.get('parent'))
-
-    id_map = {}
-    for node_id, name in node_name.items():
-        if not name:
-            continue
-
-        path = [name]
-        parent_id = node_parent.get(node_id)
-        seen = {node_id}
-
-        while parent_id is not None and parent_id in node_name and parent_id not in seen:
-            seen.add(parent_id)
-            path.insert(0, node_name[parent_id])
-            parent_id = node_parent.get(parent_id)
-
-        id_map['/'.join(path)] = node_id
-
-    return id_map
+    return {}
 
 
 def get_category_tree(category_id: int) -> dict:
