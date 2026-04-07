@@ -13,7 +13,7 @@ import requests
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from ...common.tools import cprint
 from ...database import inventree_interface
@@ -28,7 +28,7 @@ class BarcodeScannedRow:
     Attributes:
         raw_barcode: Raw barcode text from scanner
         barcode: Normalized barcode value for API/linking (MFN PN)
-        supplier: Detected supplier ('tme', 'mouser', 'digikey')
+        supplier: Detected supplier ('tme', 'mouser', 'digikey', 'lcsc')
         supplier_pn: Supplier-specific part number (empty for Mouser)
         manufacturer_pn: Standard manufacturer part number (used for search)
         search_name: Best available part number (mfn or supplier_pn)
@@ -84,6 +84,32 @@ class BarcodeScannedRow:
         self.has_barcode = False
         self.barcode_hash = ''
         self.current_barcodes: List[str] = []
+        raw_data = parsed.get('raw_data') if isinstance(parsed.get('raw_data'), dict) else {}
+        order_number = str(
+            parsed.get('order_number')
+            or parsed.get('supplier_order_number')
+            or parsed.get('customer_order_number')
+            or raw_data.get('order_number')
+            or raw_data.get('supplier_order_number')
+            or raw_data.get('customer_order_number')
+            or raw_data.get('po')
+            or raw_data.get('on')
+            or raw_data.get('cpo')
+            or ''
+        ).strip()
+
+        # For TME, truncate at '/' (e.g., '34210324/5' -> '34210324')
+        if self.supplier == 'tme' and order_number:
+            order_number = order_number.split('/', 1)[0].strip()
+
+        if not order_number:
+            raw_barcode_upper = str(barcode or '').upper()
+            ref_match = re.search(r'\b(?:CPO|PO|ON)\s*[:=]\s*([A-Z0-9\-_/\.]+)', raw_barcode_upper)
+            if ref_match:
+                order_number = ref_match.group(1).strip()
+
+        self.order_number = order_number
+        self.supplier_order_reference = order_number
 
 
 class ExistingPartScanRow:
@@ -107,6 +133,13 @@ class ExistingPartScanRow:
 
 class _BarcodeApiHelpers:
     """Shared API helper methods used by Barcode and Assign workflows."""
+
+    PO_SUPPLIER_NAME_MAP = {
+        'digikey': ['Digi-Key'],
+        'mouser': ['Mouser'],
+        'tme': ['TME'],
+        'lcsc': ['LCSC'],
+    }
 
     @staticmethod
     def normalize_stock_location_value(location: str) -> str:
@@ -180,12 +213,19 @@ class _BarcodeApiHelpers:
                                     break
 
                             if result is None:
-                                result = rows[0]
+                                # Avoid fuzzy fallback to an arbitrary first search hit,
+                                # which can bind scans to a wrong, similarly named part.
+                                result = None
         except Exception:
             result = None
         finally:
             with ctx._part_lookup_lock:
-                ctx._part_lookup_cache[cache_key] = result
+                # Do not cache misses forever; transient API failures would otherwise
+                # require restarting the UI session to recover.
+                if result is not None:
+                    ctx._part_lookup_cache[cache_key] = result
+                else:
+                    ctx._part_lookup_cache.pop(cache_key, None)
                 inflight_event = ctx._part_lookup_inflight.pop(cache_key, None)
                 if inflight_event is not None:
                     inflight_event.set()
@@ -499,6 +539,741 @@ class _BarcodeApiHelpers:
 
         return False, 'Bulk stock transfer request failed'
 
+    @staticmethod
+    def _get_auth_context() -> tuple[Any, Optional[str], str]:
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        token = getattr(api_obj, 'token', None) if api_obj else None
+        base_url = getattr(api_obj, 'base_url', '') if api_obj else ''
+        return api_obj, token, base_url
+
+    @staticmethod
+    def _extract_rows(payload) -> List[Dict]:
+        if isinstance(payload, dict):
+            rows = payload.get('results') or []
+        elif isinstance(payload, list):
+            rows = payload
+        else:
+            rows = []
+        return [item for item in rows if isinstance(item, dict)]
+
+    @staticmethod
+    def _extract_pk(entity: Optional[Dict]) -> int:
+        if not isinstance(entity, dict):
+            return 0
+        value = entity.get('pk') or entity.get('id') or 0
+        try:
+            return int(value)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _match_reference(entity: Dict, reference: str) -> bool:
+        probe = str(reference or '').strip().lower()
+        if not probe:
+            return False
+        for key in ['reference', 'order_reference', 'external_reference', 'supplier_reference']:
+            value = str(entity.get(key) or '').strip().lower()
+            if value and value == probe:
+                return True
+        return False
+
+    @staticmethod
+    def _is_open_po_status(value) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() not in ['complete', 'completed', 'closed', 'cancelled', 'canceled']
+        try:
+            status_num = int(value)
+            return status_num < 40
+        except Exception:
+            return True
+
+    @staticmethod
+    def _response_excerpt(response: Optional[requests.Response], limit: int = 220) -> str:
+        if response is None:
+            return 'no response'
+        try:
+            text = (response.text or '').strip().replace('\n', ' ')
+        except Exception:
+            text = ''
+        if not text:
+            return f'HTTP {response.status_code}'
+        if len(text) > limit:
+            text = text[:limit] + '...'
+        return f'HTTP {response.status_code} body={text}'
+
+    @staticmethod
+    def _po_summary(po_data: Dict) -> str:
+        po_pk = _BarcodeApiHelpers._extract_pk(po_data)
+        ref = str(po_data.get('reference') or '').strip() or '-'
+        supplier_ref = str(
+            po_data.get('supplier_reference')
+            or po_data.get('order_reference')
+            or po_data.get('external_reference')
+            or ''
+        ).strip() or '-'
+        status = str(po_data.get('status') or '-').strip()
+        return f'pk={po_pk} ref={ref} supplier_ref={supplier_ref} status={status}'
+
+    @staticmethod
+    def list_open_purchase_orders(ctx, supplier_pk: int, limit: int = 50) -> List[Dict]:
+        if supplier_pk <= 0:
+            return []
+
+        endpoint = _BarcodeApiHelpers._pick_po_endpoint(ctx, for_lines=False)
+        api_obj, token, _ = _BarcodeApiHelpers._get_auth_context()
+        if not endpoint or not api_obj or not token:
+            return []
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+
+        response = ctx._request_with_retries(
+            method='GET',
+            url=endpoint,
+            headers=headers,
+            params={'supplier': int(supplier_pk), 'limit': int(max(1, limit))},
+            timeout=20,
+        )
+        if response is None:
+            return []
+
+        rows = []
+        for item in _BarcodeApiHelpers._extract_rows(response.json()):
+            supplier_ref = item.get('supplier')
+            if isinstance(supplier_ref, dict):
+                item_supplier = _BarcodeApiHelpers._extract_pk(supplier_ref)
+            else:
+                try:
+                    item_supplier = int(supplier_ref)
+                except Exception:
+                    item_supplier = 0
+
+            if item_supplier != int(supplier_pk):
+                continue
+            if not _BarcodeApiHelpers._is_open_po_status(item.get('status')):
+                continue
+            rows.append(item)
+
+        return rows
+
+    @staticmethod
+    def resolve_supplier_company_pk(ctx, supplier_key: str) -> int:
+        supplier_norm = str(supplier_key or '').strip().lower()
+        if not supplier_norm:
+            return 0
+
+        cache = getattr(ctx, '_supplier_company_cache', None)
+        if isinstance(cache, dict) and supplier_norm in cache:
+            cached_pk = int(cache.get(supplier_norm) or 0)
+            if cached_pk > 0:
+                try:
+                    current_companies = inventree_interface.inventree_api.get_all_companies()
+                    if cached_pk in current_companies.values():
+                        cprint(f'[BARCODE][PO]\tSupplier cache hit validated: {supplier_norm} -> pk={cached_pk}', silent=False)
+                        return cached_pk
+                    cprint(f'[BARCODE][PO]\tSupplier cache stale: {supplier_norm} -> pk={cached_pk}', silent=False)
+                except Exception as exc:
+                    cprint(f'[BARCODE][PO]\tSupplier cache validation failed for {supplier_norm}: {str(exc)[:80]}', silent=False)
+
+        api_obj, token, base_url = _BarcodeApiHelpers._get_auth_context()
+        if not api_obj or not token or not base_url:
+            return 0
+
+        company_map: Dict[str, int] = {}
+        try:
+            company_map = inventree_interface.inventree_api.get_all_companies() or {}
+        except Exception:
+            company_map = {}
+
+        if not company_map:
+            return 0
+
+        aliases = _BarcodeApiHelpers.PO_SUPPLIER_NAME_MAP.get(supplier_norm, [])
+        probe_names = [supplier_key, supplier_norm.upper(), supplier_norm.title(), *aliases]
+        probe_names = [str(name).strip() for name in probe_names if str(name).strip()]
+
+        def _pick_company(probe: str) -> int:
+            probe_lower = str(probe or '').strip().lower()
+            if not probe_lower:
+                return 0
+
+            exact_matches = []
+            contains_matches = []
+            for company_name, company_pk in company_map.items():
+                company_lower = str(company_name or '').strip().lower()
+                if not company_lower:
+                    continue
+                if company_lower == probe_lower:
+                    exact_matches.append((company_name, int(company_pk or 0)))
+                elif probe_lower in company_lower:
+                    contains_matches.append((company_name, int(company_pk or 0)))
+
+            if exact_matches:
+                company_name, company_pk = exact_matches[0]
+                cprint(f'[BARCODE][PO]\tSupplier exact match: {probe} -> {company_name} pk={company_pk}', silent=False)
+                return company_pk
+
+            if contains_matches:
+                contains_matches.sort(key=lambda item: (len(str(item[0] or '')), str(item[0] or '').lower()))
+                company_name, company_pk = contains_matches[0]
+                cprint(f'[BARCODE][PO]\tSupplier contains match: {probe} -> {company_name} pk={company_pk}', silent=False)
+                return company_pk
+
+            return 0
+
+        supplier_pk = 0
+        for probe in probe_names:
+            supplier_pk = _pick_company(probe)
+            if supplier_pk > 0:
+                break
+
+        if supplier_pk <= 0:
+            sample_names = ', '.join(list(company_map.keys())[:12])
+            cprint(
+                f'[BARCODE][PO]\tNo supplier company match for {supplier_norm}; available companies sample: {sample_names}',
+                silent=False,
+            )
+
+        if isinstance(cache, dict):
+            cache[supplier_norm] = supplier_pk
+
+        return supplier_pk
+
+    @staticmethod
+    def _pick_po_endpoint(ctx, for_lines: bool = False) -> str:
+        cache = getattr(ctx, '_po_endpoint_cache', None)
+        cache_key = 'po_line_list' if for_lines else 'po_list'
+        if isinstance(cache, dict) and cache.get(cache_key):
+            return str(cache[cache_key])
+
+        api_obj, token, base_url = _BarcodeApiHelpers._get_auth_context()
+        if not api_obj or not token or not base_url:
+            return ''
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+
+        candidates = ['/api/order/po-line/', '/api/order/purchase-line/'] if for_lines else ['/api/order/po/', '/api/order/purchase/']
+
+        for path in candidates:
+            endpoint = f"{base_url.rstrip('/')}{path}"
+            response = ctx._request_with_retries(
+                method='GET',
+                url=endpoint,
+                headers=headers,
+                params={'limit': 1},
+                timeout=10,
+            )
+            if response is not None:
+                if isinstance(cache, dict):
+                    cache[cache_key] = endpoint
+                cprint(f"[BARCODE][PO]\tResolved {'line' if for_lines else 'header'} endpoint: {endpoint}", silent=False)
+                return endpoint
+
+        cprint(
+            f"[BARCODE][PO]\tFailed to resolve {'line' if for_lines else 'header'} endpoint from candidates={candidates}",
+            silent=False,
+        )
+        return ''
+
+    @staticmethod
+    def find_open_purchase_order(ctx, supplier_pk: int, reference: str) -> Optional[Dict]:
+        if supplier_pk <= 0 or not str(reference or '').strip():
+            return None
+
+        endpoint = _BarcodeApiHelpers._pick_po_endpoint(ctx, for_lines=False)
+        api_obj, token, _ = _BarcodeApiHelpers._get_auth_context()
+        if not endpoint or not api_obj or not token:
+            return None
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+
+        response = ctx._request_with_retries(
+            method='GET',
+            url=endpoint,
+            headers=headers,
+            params={'supplier': int(supplier_pk), 'search': reference, 'limit': 25},
+            timeout=20,
+        )
+        if response is None:
+            return None
+
+        for item in _BarcodeApiHelpers._extract_rows(response.json()):
+            supplier_ref = item.get('supplier')
+            if isinstance(supplier_ref, dict):
+                item_supplier = _BarcodeApiHelpers._extract_pk(supplier_ref)
+            else:
+                try:
+                    item_supplier = int(supplier_ref)
+                except Exception:
+                    item_supplier = 0
+
+            if item_supplier != int(supplier_pk):
+                continue
+            if not _BarcodeApiHelpers._match_reference(item, reference):
+                continue
+            if not _BarcodeApiHelpers._is_open_po_status(item.get('status')):
+                continue
+            return item
+
+        return None
+
+    @staticmethod
+    def get_po_location_pk(po_data: Optional[Dict]) -> int:
+        if not isinstance(po_data, dict):
+            return 0
+        for key in ['destination', 'location', 'target_location']:
+            value = po_data.get(key)
+            if isinstance(value, dict):
+                pk = _BarcodeApiHelpers._extract_pk(value)
+            else:
+                try:
+                    pk = int(value)
+                except Exception:
+                    pk = 0
+            if pk > 0:
+                return pk
+        return 0
+
+    @staticmethod
+    def create_purchase_order(ctx, supplier_pk: int, reference: str, location_pk: int = 0) -> tuple[Optional[Dict], str]:
+        if supplier_pk <= 0 or not str(reference or '').strip():
+            return None, 'Invalid supplier or order reference'
+
+        endpoint = _BarcodeApiHelpers._pick_po_endpoint(ctx, for_lines=False)
+        api_obj, token, _ = _BarcodeApiHelpers._get_auth_context()
+        if not endpoint or not api_obj or not token:
+            return None, 'Purchase order endpoint unavailable'
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+
+        supplier_reference = str(reference).strip()
+
+        base_payload = {
+            'supplier': int(supplier_pk),
+            'supplier_reference': supplier_reference,
+            'description': 'Created by Ki-nTree barcode PO flow',
+        }
+        payloads = [dict(base_payload)]
+        if location_pk > 0:
+            payloads.append({**base_payload, 'destination': int(location_pk)})
+            payloads.append({**base_payload, 'location': int(location_pk)})
+        payloads.append({**base_payload, 'supplier_name': supplier_reference})
+
+        last_error = 'Failed to create purchase order'
+        cprint(
+            f'[BARCODE][PO]\tCreate PO: endpoint={endpoint} supplier_pk={supplier_pk} supplier_ref={supplier_reference} location_pk={location_pk}',
+            silent=False,
+        )
+        for payload_index, payload in enumerate(payloads, start=1):
+            response = None
+            cprint(
+                f"[BARCODE][PO]\tCreate PO attempt {payload_index}/{len(payloads)} payload={payload}",
+                silent=False,
+            )
+            for request_try in range(1, 4):
+                try:
+                    response = ctx._http.request(
+                        method='POST',
+                        url=endpoint,
+                        headers=headers,
+                        json=payload,
+                        timeout=25,
+                    )
+                    if response.status_code == 429 or response.status_code >= 500:
+                        raise requests.HTTPError(f'HTTP {response.status_code}', response=response)
+
+                    if response.status_code in [200, 201, 202]:
+                        cprint(
+                            f'[BARCODE][PO]\tCreate PO success via payload {payload_index} (HTTP {response.status_code})',
+                            silent=False,
+                        )
+                        try:
+                            created = response.json()
+                            if isinstance(created, dict):
+                                return created, ''
+                        except Exception:
+                            pass
+                        return {'pk': 0}, ''
+
+                    # Keep client errors for diagnostics and stop retrying this payload.
+                    if 400 <= response.status_code < 500 and response.status_code != 429:
+                        break
+                except requests.RequestException as exc:
+                    response = getattr(exc, 'response', None)
+                    if request_try < 3:
+                        time.sleep(1.0)
+                    else:
+                        break
+
+            detail = _BarcodeApiHelpers._response_excerpt(response)
+            cprint(f'[BARCODE][PO]\tCreate PO attempt {payload_index} failed: {detail}', silent=False)
+            last_error = f'PO create failed ({detail})'
+
+        return None, last_error
+
+    @staticmethod
+    def find_po_line_for_part(ctx, po_pk: int, part_pk: int) -> Optional[Dict]:
+        if po_pk <= 0 or part_pk <= 0:
+            return None
+
+        endpoint = _BarcodeApiHelpers._pick_po_endpoint(ctx, for_lines=True)
+        api_obj, token, _ = _BarcodeApiHelpers._get_auth_context()
+        if not endpoint or not api_obj or not token:
+            return None
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+
+        for order_key in ['order', 'purchase_order', 'po']:
+            response = ctx._request_with_retries(
+                method='GET',
+                url=endpoint,
+                headers=headers,
+                params={order_key: int(po_pk), 'part': int(part_pk), 'limit': 100},
+                timeout=20,
+            )
+            if response is None:
+                continue
+
+            for item in _BarcodeApiHelpers._extract_rows(response.json()):
+                # Hard guard: never reuse a line from another PO.
+                line_order_ref = item.get('order') or item.get('purchase_order') or item.get('po')
+                if isinstance(line_order_ref, dict):
+                    line_po_pk = _BarcodeApiHelpers._extract_pk(line_order_ref)
+                else:
+                    try:
+                        line_po_pk = int(line_order_ref)
+                    except Exception:
+                        line_po_pk = 0
+                if line_po_pk and int(line_po_pk) != int(po_pk):
+                    continue
+
+                part_ref = item.get('part') or item.get('part_detail')
+                if isinstance(part_ref, dict):
+                    item_part = _BarcodeApiHelpers._extract_pk(part_ref)
+                else:
+                    try:
+                        item_part = int(part_ref)
+                    except Exception:
+                        item_part = 0
+                if item_part == int(part_pk):
+                    cprint(
+                        f'[BARCODE][PO]\tMatched existing line line={_BarcodeApiHelpers._extract_pk(item)} po={po_pk} supplier_part={part_pk}',
+                        silent=False,
+                    )
+                    return item
+
+        return None
+
+    @staticmethod
+    def find_po_line_for_internal_part(ctx, po_pk: int, internal_part_pk: int) -> Optional[Dict]:
+        if po_pk <= 0 or internal_part_pk <= 0:
+            return None
+
+        endpoint = _BarcodeApiHelpers._pick_po_endpoint(ctx, for_lines=True)
+        api_obj, token, _ = _BarcodeApiHelpers._get_auth_context()
+        if not endpoint or not api_obj or not token:
+            return None
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+
+        for order_key in ['order', 'purchase_order', 'po']:
+            response = ctx._request_with_retries(
+                method='GET',
+                url=endpoint,
+                headers=headers,
+                params={order_key: int(po_pk), 'limit': 100},
+                timeout=20,
+            )
+            if response is None:
+                continue
+
+            for item in _BarcodeApiHelpers._extract_rows(response.json()):
+                line_order_ref = item.get('order') or item.get('purchase_order') or item.get('po')
+                if isinstance(line_order_ref, dict):
+                    line_po_pk = _BarcodeApiHelpers._extract_pk(line_order_ref)
+                else:
+                    try:
+                        line_po_pk = int(line_order_ref)
+                    except Exception:
+                        line_po_pk = 0
+                if line_po_pk and int(line_po_pk) != int(po_pk):
+                    continue
+
+                item_internal_part = 0
+                part_detail = item.get('part_detail')
+                if isinstance(part_detail, dict):
+                    raw_internal = part_detail.get('part') or part_detail.get('part_pk') or part_detail.get('part_id')
+                    if isinstance(raw_internal, dict):
+                        item_internal_part = _BarcodeApiHelpers._extract_pk(raw_internal)
+                    else:
+                        try:
+                            item_internal_part = int(raw_internal)
+                        except Exception:
+                            item_internal_part = 0
+
+                if item_internal_part == int(internal_part_pk):
+                    cprint(
+                        f'[BARCODE][PO]\tMatched existing line by internal part line={_BarcodeApiHelpers._extract_pk(item)} po={po_pk} part_pk={internal_part_pk}',
+                        silent=False,
+                    )
+                    return item
+
+        return None
+
+    @staticmethod
+    def create_po_line(ctx, po_pk: int, part_pk: int, quantity: int) -> tuple[Optional[Dict], str]:
+        if po_pk <= 0 or part_pk <= 0:
+            return None, 'Invalid PO or part ID'
+
+        endpoint = _BarcodeApiHelpers._pick_po_endpoint(ctx, for_lines=True)
+        api_obj, token, _ = _BarcodeApiHelpers._get_auth_context()
+        if not endpoint or not api_obj or not token:
+            return None, 'Purchase order line endpoint unavailable'
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+
+        qty = max(1, int(quantity or 1))
+        payloads = [
+            {'order': int(po_pk), 'part': int(part_pk), 'quantity': qty},
+            {'purchase_order': int(po_pk), 'part': int(part_pk), 'quantity': qty},
+            {'po': int(po_pk), 'part': int(part_pk), 'quantity': qty},
+            {'order': int(po_pk), 'part': int(part_pk), 'target_quantity': qty},
+            {'purchase_order': int(po_pk), 'part': int(part_pk), 'target_quantity': qty},
+            {'po': int(po_pk), 'part': int(part_pk), 'target_quantity': qty},
+        ]
+
+        cprint(f'[BARCODE][PO]\tCreate line: endpoint={endpoint} po={po_pk} part={part_pk} qty={qty}', silent=False)
+
+        for payload_index, payload in enumerate(payloads, start=1):
+            response = None
+            cprint(f'[BARCODE][PO]\tCreate line attempt {payload_index}/{len(payloads)} payload={payload}', silent=False)
+            for request_try in range(1, 4):
+                try:
+                    response = ctx._http.request(
+                        method='POST',
+                        url=endpoint,
+                        headers=headers,
+                        json=payload,
+                        timeout=25,
+                    )
+                    if response.status_code == 429 or response.status_code >= 500:
+                        raise requests.HTTPError(f'HTTP {response.status_code}', response=response)
+
+                    if response.status_code in [200, 201, 202]:
+                        cprint(
+                            f'[BARCODE][PO]\tCreate line success via payload {payload_index} (HTTP {response.status_code})',
+                            silent=False,
+                        )
+                        try:
+                            created = response.json()
+                            if isinstance(created, dict):
+                                return created, ''
+                        except Exception:
+                            pass
+                        return {'pk': 0, 'part': int(part_pk)}, ''
+
+                    if 400 <= response.status_code < 500 and response.status_code != 429:
+                        break
+                except requests.RequestException as exc:
+                    response = getattr(exc, 'response', None)
+                    if request_try < 3:
+                        time.sleep(1.0)
+                    else:
+                        break
+
+            detail = _BarcodeApiHelpers._response_excerpt(response)
+            cprint(f'[BARCODE][PO]\tCreate line attempt {payload_index} failed: {detail}', silent=False)
+
+        return None, 'Failed to create PO line item'
+
+    @staticmethod
+    def get_po_line_quantities(line_data: Optional[Dict]) -> tuple[int, int]:
+        if not isinstance(line_data, dict):
+            return 0, 0
+
+        ordered = 0
+        for key in ['quantity', 'target_quantity', 'ordered', 'ordered_quantity']:
+            try:
+                value = int(float(line_data.get(key) or 0))
+                if value > ordered:
+                    ordered = value
+            except Exception:
+                continue
+
+        received = 0
+        for key in ['received', 'received_quantity', 'received_qty']:
+            try:
+                value = int(float(line_data.get(key) or 0))
+                if value > received:
+                    received = value
+            except Exception:
+                continue
+
+        return ordered, received
+
+    @staticmethod
+    def update_po_line_quantity(ctx, line_pk: int, quantity: int) -> tuple[bool, str]:
+        if line_pk <= 0:
+            return False, 'Invalid PO line ID'
+
+        endpoint = _BarcodeApiHelpers._pick_po_endpoint(ctx, for_lines=True)
+        api_obj, token, _ = _BarcodeApiHelpers._get_auth_context()
+        if not endpoint or not api_obj or not token:
+            return False, 'Purchase order line endpoint unavailable'
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+
+        qty = max(1, int(quantity or 1))
+        line_endpoint = f"{endpoint.rstrip('/')}/{int(line_pk)}/"
+        payloads = [
+            {'quantity': qty},
+            {'target_quantity': qty},
+            {'quantity': qty, 'target_quantity': qty},
+        ]
+
+        cprint(f'[BARCODE][PO]\tUpdate line: endpoint={line_endpoint} line={line_pk} qty={qty}', silent=False)
+
+        for payload in payloads:
+            response = ctx._request_with_retries(
+                method='PATCH',
+                url=line_endpoint,
+                headers=headers,
+                json=payload,
+                timeout=25,
+            )
+            if response is not None and response.status_code in [200, 202]:
+                return True, ''
+
+            if response is not None:
+                cprint(
+                    f"[BARCODE][PO]\tUpdate line attempt failed payload={payload}: {_BarcodeApiHelpers._response_excerpt(response)}",
+                    silent=False,
+                )
+
+        return False, 'Failed to update PO line quantity'
+
+    @staticmethod
+    def receive_po_items(ctx, po_pk: int, items: List[Dict], location_pk: int = 0) -> tuple[bool, str]:
+        if po_pk <= 0:
+            return False, 'Invalid PO ID'
+
+        api_obj, token, base_url = _BarcodeApiHelpers._get_auth_context()
+        if not api_obj or not token or not base_url:
+            return False, 'Missing InvenTree auth context'
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+
+        normalized_items: List[Dict] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            line_item = int(item.get('line_item') or item.get('line') or item.get('pk') or 0)
+            qty = max(1, int(item.get('quantity') or 1))
+            payload_item = {
+                'line_item': line_item,
+                'quantity': qty,
+            }
+            if location_pk > 0:
+                payload_item['location'] = int(location_pk)
+            if item.get('packaging'):
+                payload_item['packaging'] = str(item.get('packaging'))
+            if item.get('batch_code'):
+                payload_item['batch_code'] = str(item.get('batch_code'))
+            normalized_items.append(payload_item)
+
+        if not normalized_items:
+            return False, 'No PO items to receive'
+
+        endpoint_candidates = [
+            f"{base_url.rstrip('/')}/api/order/po/{int(po_pk)}/receive/",
+            f"{base_url.rstrip('/')}/api/order/purchase/{int(po_pk)}/receive/",
+        ]
+
+        payloads = [
+            {'items': normalized_items, 'location': int(location_pk)} if location_pk > 0 else {'items': normalized_items},
+        ]
+
+        for endpoint in endpoint_candidates:
+            for payload in payloads:
+                cprint(f'[BARCODE][PO]\tReceive PO attempt endpoint={endpoint} payload={payload}', silent=False)
+                response = ctx._request_with_retries(
+                    method='POST',
+                    url=endpoint,
+                    headers=headers,
+                    json=payload,
+                    timeout=45,
+                )
+                if response is None:
+                    continue
+                if response.status_code in [200, 201, 202]:
+                    return True, ''
+                cprint(f'[BARCODE][PO]\tReceive PO failed: {_BarcodeApiHelpers._response_excerpt(response)}', silent=False)
+
+        return False, 'Failed to receive PO items'
+
+    @staticmethod
+    def trigger_po_action(ctx, po_pk: int, action: str) -> bool:
+        if po_pk <= 0 or not str(action or '').strip():
+            return False
+
+        api_obj, token, base_url = _BarcodeApiHelpers._get_auth_context()
+        if not api_obj or not token or not base_url:
+            return False
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+
+        endpoint_candidates = [
+            f"{base_url.rstrip('/')}/api/order/po/{int(po_pk)}/{action}/",
+            f"{base_url.rstrip('/')}/api/order/purchase/{int(po_pk)}/{action}/",
+        ]
+
+        for endpoint in endpoint_candidates:
+            response = ctx._request_with_retries(
+                method='POST',
+                url=endpoint,
+                headers=headers,
+                json={},
+                timeout=20,
+            )
+            if response is not None and response.status_code in [200, 201, 202, 204]:
+                return True
+
+        return False
+
 
 class BarcodeImportView(MainView):
     """Barcode scanner and import view for Ki-nTree.
@@ -545,9 +1320,12 @@ class BarcodeImportView(MainView):
         self._http = requests.Session()
         self._barcode_endpoint_available: Optional[bool] = None
         self._connect_lock = threading.Lock()
+        self._part_create_lock = threading.Lock()
         self._part_lookup_cache: Dict[str, Optional[Dict]] = {}
         self._part_lookup_lock = threading.Lock()
         self._part_lookup_inflight: Dict[str, threading.Event] = {}
+        self._po_endpoint_cache: Dict[str, str] = {}
+        self._supplier_company_cache: Dict[str, int] = {}
 
         # Call parent init
         super().__init__(page=page)
@@ -600,6 +1378,7 @@ class BarcodeImportView(MainView):
             columns=[
                 ft.DataColumn(ft.Text('Input Code')),
                 ft.DataColumn(ft.Text('Supplier')),
+                ft.DataColumn(ft.Text('Order Number')),
                 ft.DataColumn(ft.Text('Status')),
                 ft.DataColumn(ft.Text('Part')),
                 ft.DataColumn(ft.Text('Location')),
@@ -679,6 +1458,12 @@ class BarcodeImportView(MainView):
             label='Assign selected location to all stock items of the part',
             value=True,
         )
+
+        self.fields['po_flow_check'] = ft.Checkbox(
+            label='Process Purchase Orders from supplier order references',
+            value=False,
+            on_change=self._on_po_flow_changed,
+        )
         
         # Submit button
         self.fields['barcode_submit'] = ft.ElevatedButton(
@@ -748,6 +1533,9 @@ class BarcodeImportView(MainView):
                             
                             ft.Text('Stock Item Location:', style=ft.TextThemeStyle.BODY_MEDIUM),
                             self.fields['assign_all_stock_items_location_check'],
+
+                            ft.Text('Purchase Order Flow:', style=ft.TextThemeStyle.BODY_MEDIUM),
+                            self.fields['po_flow_check'],
                             
                             ft.Divider(),
                             
@@ -941,7 +1729,11 @@ class BarcodeImportView(MainView):
         now = time.monotonic()
         recent_ts = self._recent_scan_codes.get(normalized)
         if recent_ts is not None and (now - recent_ts) < 1.5:
-            cprint(f'[BARCODE]\tIgnored duplicate scan: {normalized}', silent=False)
+            delta_ms = (now - recent_ts) * 1000.0
+            cprint(
+                f'[BARCODE]\tIgnored duplicate scan ({delta_ms:.1f} ms since previous, len={len(normalized)}): {normalized}',
+                silent=False,
+            )
             return False
 
         self._recent_scan_codes[normalized] = now
@@ -1017,7 +1809,10 @@ class BarcodeImportView(MainView):
             elif part_pk > 0:
                 part_text = f'Part ({part_pk})'
             else:
-                part_text = str(row.search_name or row.manufacturer_pn or row.supplier_pn or '-')
+                if str(getattr(row, 'status', '')).lower().startswith('checking'):
+                    part_text = '(resolving...)'
+                else:
+                    part_text = str(row.search_name or row.manufacturer_pn or row.supplier_pn or '-')
             location_text = self._truncate_text(str(row.location or '(default)'), max_len=70)
             if row.current_barcodes:
                 barcode_display = ', '.join(row.current_barcodes[:2])
@@ -1044,6 +1839,7 @@ class BarcodeImportView(MainView):
                 cells=[
                     ft.DataCell(ft.Text(input_code, size=12, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
                     ft.DataCell(ft.Text(row.supplier.upper(), size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)),
+                    ft.DataCell(ft.Text(getattr(row, 'order_number', '') or getattr(row, 'supplier_order_reference', ''), size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)),
                     ft.DataCell(ft.Text(status_text, size=12, color=status_color, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
                     ft.DataCell(ft.Text(part_text, size=12, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
                     ft.DataCell(ft.Text(location_text, size=12, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
@@ -1052,6 +1848,7 @@ class BarcodeImportView(MainView):
                     ft.DataCell(ft.Text(category_text, size=12, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
                     ft.DataCell(ft.Checkbox(
                         value=row.create_stock,
+                        disabled=bool(self.fields.get('po_flow_check').value),
                         on_change=lambda _, i=idx: self._toggle_create_stock(i),
                     )),
                     ft.DataCell(remove_btn),
@@ -1071,8 +1868,312 @@ class BarcodeImportView(MainView):
             return text
         return text[:max_len - 3] + '...'
 
+    def _validate_part_pk(self, part_pk: int) -> bool:
+        if int(part_pk or 0) <= 0:
+            return False
+
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        token = getattr(api_obj, 'token', None) if api_obj else None
+        base_url = getattr(api_obj, 'base_url', '') if api_obj else ''
+        if not token or not base_url:
+            return False
+
+        try:
+            response = self._request_with_retries(
+                method='GET',
+                url=f"{base_url.rstrip('/')}/api/part/{int(part_pk)}/",
+                headers={
+                    'Authorization': f'Token {token}',
+                    'Accept': 'application/json',
+                },
+                timeout=20,
+            )
+            return response is not None
+        except Exception:
+            return False
+
+    def _fetch_part_detail(self, part_pk: int) -> Optional[Dict]:
+        if int(part_pk or 0) <= 0:
+            return None
+
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        token = getattr(api_obj, 'token', None) if api_obj else None
+        base_url = getattr(api_obj, 'base_url', '') if api_obj else ''
+        if not token or not base_url:
+            return None
+
+        response = self._request_with_retries(
+            method='GET',
+            url=f"{base_url.rstrip('/')}/api/part/{int(part_pk)}/",
+            headers={
+                'Authorization': f'Token {token}',
+                'Accept': 'application/json',
+            },
+            timeout=20,
+        )
+        if response is None:
+            return None
+
+        try:
+            payload = response.json()
+            return payload if isinstance(payload, dict) else None
+        except Exception:
+            return None
+
     def _find_part_by_lookup(self, lookup_value: str) -> Optional[Dict]:
         return _BarcodeApiHelpers.find_part_by_lookup(self, lookup_value)
+
+    def _find_supplier_part_for_row(self, lookup_values: List[str], supplier_key: str) -> Optional[Dict]:
+        probe_values: List[str] = []
+        for value in lookup_values:
+            text = str(value or '').strip()
+            if text and text not in probe_values:
+                probe_values.append(text)
+
+        supplier_norm = str(supplier_key or '').strip().lower()
+        supplier_aliases = _BarcodeApiHelpers.PO_SUPPLIER_NAME_MAP.get(supplier_norm, [supplier_key])
+        supplier_aliases = [str(alias).strip() for alias in supplier_aliases if str(alias).strip()]
+
+        supplier_pk = _BarcodeApiHelpers.resolve_supplier_company_pk(self, supplier_norm)
+        if supplier_pk <= 0:
+            cprint(f'[BARCODE][PO]\tUnable to resolve supplier company for {supplier_norm}', silent=False)
+            return None
+
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        token = getattr(api_obj, 'token', None) if api_obj else None
+        base_url = getattr(api_obj, 'base_url', '') if api_obj else ''
+        if not token or not base_url:
+            return None
+
+        try:
+            headers = {
+                'Authorization': f'Token {token}',
+                'Accept': 'application/json',
+            }
+            endpoint = f"{base_url.rstrip('/')}/api/company/part/"
+
+            for probe in probe_values:
+                response = self._request_with_retries(
+                    method='GET',
+                    url=endpoint,
+                    headers=headers,
+                    params={'supplier': int(supplier_pk), 'search': probe, 'limit': 10},
+                    timeout=20,
+                )
+                if response is None:
+                    continue
+
+                payload = response.json()
+                if isinstance(payload, dict):
+                    rows = payload.get('results') or []
+                elif isinstance(payload, list):
+                    rows = payload
+                else:
+                    rows = []
+
+                for candidate in rows:
+                    if not isinstance(candidate, dict):
+                        continue
+
+                    supplier_name = ''
+                    supplier_detail = candidate.get('supplier_detail')
+                    if isinstance(supplier_detail, dict):
+                        supplier_name = str(supplier_detail.get('name') or '').strip().lower()
+                    if not supplier_name:
+                        supplier_ref = candidate.get('supplier')
+                        if isinstance(supplier_ref, dict):
+                            supplier_name = str(supplier_ref.get('name') or supplier_ref.get('display_name') or '').strip().lower()
+
+                    if supplier_aliases and supplier_name:
+                        if not any(alias.lower() == supplier_name or alias.lower() in supplier_name for alias in supplier_aliases):
+                            continue
+
+                    candidate_pk = 0
+                    try:
+                        candidate_pk = int(candidate.get('pk') or candidate.get('id') or 0)
+                    except Exception:
+                        candidate_pk = 0
+
+                    part_ref = candidate.get('part') or candidate.get('part_detail')
+                    if isinstance(part_ref, dict):
+                        part_pk = part_ref.get('pk') or part_ref.get('id') or 0
+                    else:
+                        part_pk = part_ref or 0
+
+                    try:
+                        part_pk = int(part_pk)
+                    except Exception:
+                        part_pk = 0
+
+                    if candidate_pk <= 0:
+                        continue
+
+                    supplier_part_number = str(
+                        candidate.get('SKU')
+                        or candidate.get('sku')
+                        or candidate.get('supplier_part_number')
+                        or candidate.get('supplier_sku')
+                        or candidate.get('part_number')
+                        or ''
+                    ).strip().lower()
+
+                    probe_lower = probe.lower()
+                    if probe_lower and supplier_part_number and probe_lower in supplier_part_number:
+                        return {
+                            'supplier_part_pk': candidate_pk,
+                            'part_pk': part_pk,
+                            'supplier_name': supplier_name,
+                            'supplier_part_number': supplier_part_number,
+                        }
+
+                    # If the supplier and part are already exact, accept the candidate
+                    # even when the SKU text does not mirror the lookup string.
+                    return {
+                        'supplier_part_pk': candidate_pk,
+                        'part_pk': part_pk,
+                        'supplier_name': supplier_name,
+                        'supplier_part_number': supplier_part_number,
+                    }
+        except Exception:
+            return None
+
+        return None
+
+    def _resolve_supplier_part_pk(self, supplier_pk: int, part_pk: int, lookup_values: Optional[List[str]] = None) -> int:
+        if int(supplier_pk or 0) <= 0 or int(part_pk or 0) <= 0:
+            return 0
+
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        token = getattr(api_obj, 'token', None) if api_obj else None
+        base_url = getattr(api_obj, 'base_url', '') if api_obj else ''
+        if not token or not base_url:
+            return 0
+
+        probes = [str(value or '').strip().lower() for value in (lookup_values or []) if str(value or '').strip()]
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+
+        endpoint = f"{base_url.rstrip('/')}/api/company/part/"
+        response = self._request_with_retries(
+            method='GET',
+            url=endpoint,
+            headers=headers,
+            params={'supplier': int(supplier_pk), 'part': int(part_pk), 'limit': 25},
+            timeout=20,
+        )
+        if response is None:
+            return 0
+
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                rows = payload.get('results') or []
+            elif isinstance(payload, list):
+                rows = payload
+            else:
+                rows = []
+        except Exception:
+            rows = []
+
+        if not rows:
+            return 0
+
+        # If the supplier/part pair exists, prefer that exact match.
+        for candidate in rows:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_pk = 0
+            try:
+                candidate_pk = int(candidate.get('pk') or candidate.get('id') or 0)
+            except Exception:
+                candidate_pk = 0
+            if candidate_pk > 0:
+                return candidate_pk
+
+        # Prefer SKU that matches any row probe values.
+        for candidate in rows:
+            if not isinstance(candidate, dict):
+                continue
+            sku = str(
+                candidate.get('SKU')
+                or candidate.get('sku')
+                or candidate.get('supplier_part_number')
+                or candidate.get('supplier_sku')
+                or ''
+            ).strip().lower()
+            if probes and sku and any(probe in sku or sku in probe for probe in probes):
+                try:
+                    return int(candidate.get('pk') or candidate.get('id') or 0)
+                except Exception:
+                    continue
+
+        try:
+            return int(rows[0].get('pk') or rows[0].get('id') or 0)
+        except Exception:
+            return 0
+
+    def _create_supplier_part_link(self, supplier_pk: int, part_pk: int, lookup_values: Optional[List[str]] = None) -> int:
+        if int(supplier_pk or 0) <= 0 or int(part_pk or 0) <= 0:
+            return 0
+
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        token = getattr(api_obj, 'token', None) if api_obj else None
+        base_url = getattr(api_obj, 'base_url', '') if api_obj else ''
+        if not token or not base_url:
+            return 0
+
+        endpoint = f"{base_url.rstrip('/')}/api/company/part/"
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+
+        sku_candidates: List[str] = []
+        for value in (lookup_values or []):
+            sku = str(value or '').strip()
+            if not sku:
+                continue
+            if sku.lower() in [item.lower() for item in sku_candidates]:
+                continue
+            sku_candidates.append(sku)
+
+        if not sku_candidates:
+            return 0
+
+        for sku in sku_candidates:
+            payloads = [
+                {'supplier': int(supplier_pk), 'part': int(part_pk), 'SKU': sku},
+                {'supplier': int(supplier_pk), 'part': int(part_pk), 'supplier_sku': sku},
+                {'supplier': int(supplier_pk), 'part': int(part_pk), 'supplier_part_number': sku},
+            ]
+            for payload in payloads:
+                response = self._request_with_retries(
+                    method='POST',
+                    url=endpoint,
+                    headers=headers,
+                    json=payload,
+                    timeout=20,
+                )
+                if response is None:
+                    continue
+
+                if response.status_code in [200, 201, 202]:
+                    try:
+                        created = response.json()
+                        created_pk = int((created or {}).get('pk') or (created or {}).get('id') or 0)
+                    except Exception:
+                        created_pk = 0
+                    if created_pk > 0:
+                        cprint(
+                            f"[BARCODE][PO]\tCreated missing supplier-part link supplier_pk={supplier_pk} part_pk={part_pk} supplier_part_pk={created_pk} sku={sku}",
+                            silent=False,
+                        )
+                        return created_pk
+
+        return self._resolve_supplier_part_pk(supplier_pk=supplier_pk, part_pk=part_pk, lookup_values=lookup_values)
 
     def _find_existing_part_for_row(self, lookup_values: List[str]) -> Optional[Dict]:
         """Resolve an existing part using direct part lookup first, then supplier-part fallback."""
@@ -1085,7 +2186,17 @@ class BarcodeImportView(MainView):
         for probe in probe_values:
             part_match = self._find_part_by_lookup(probe)
             if part_match:
-                return part_match
+                part_pk = int(part_match.get('pk') or part_match.get('id') or 0)
+                if part_pk > 0 and self._validate_part_pk(part_pk):
+                    part_detail = self._fetch_part_detail(part_pk)
+                    if isinstance(part_detail, dict):
+                        part_detail['supplier_part_pk'] = int(part_match.get('supplier_part_pk') or 0)
+                        return part_detail
+                    return {'pk': part_pk, 'part_pk': part_pk, 'supplier_part_pk': 0}
+                cprint(
+                    f"[BARCODE][PO]\tRejected direct part lookup result for '{probe}' because pk={part_pk} is not a valid /api/part/ record",
+                    silent=False,
+                )
 
         api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
         token = getattr(api_obj, 'token', None) if api_obj else None
@@ -1131,7 +2242,20 @@ class BarcodeImportView(MainView):
                     except Exception:
                         continue
 
-                    return {'pk': part_pk}
+                    if not self._validate_part_pk(part_pk):
+                        cprint(
+                            f"[BARCODE][PO]\tRejected company-part fallback for '{probe}' because pk={part_pk} is not a valid /api/part/ record",
+                            silent=False,
+                        )
+                        continue
+
+                    supplier_part_pk = int(candidate.get('pk') or candidate.get('id') or 0)
+                    part_detail = self._fetch_part_detail(part_pk)
+                    if isinstance(part_detail, dict):
+                        part_detail['supplier_part_pk'] = supplier_part_pk
+                        return part_detail
+
+                    return {'pk': part_pk, 'part_pk': part_pk, 'supplier_part_pk': supplier_part_pk}
         except Exception:
             return None
 
@@ -1201,13 +2325,14 @@ class BarcodeImportView(MainView):
                 row.category = ''
 
             row.barcode_hash = str(part.get('barcode_hash') or '').strip()
-            row.has_barcode = bool(row.barcode_hash)
 
             row.current_barcodes = self._fetch_part_barcodes(part_pk=row.part_pk)
             if not row.current_barcodes and row.barcode_hash:
                 # Fallback for servers where barcode endpoint is unavailable.
                 if row.part_name:
                     row.current_barcodes = [row.part_name]
+
+            row.has_barcode = bool(row.current_barcodes) or bool(row.barcode_hash)
 
             has_location = bool(row.default_location_pk)
             if has_location and row.has_barcode:
@@ -1265,9 +2390,37 @@ class BarcodeImportView(MainView):
     
     def _on_create_stock_changed(self, _):
         """Apply create_stock flag to all items."""
-        create_stock = self.fields['create_stock_check'].value
+        if bool(self.fields.get('po_flow_check').value):
+            self.fields['create_stock_check'].value = False
+            try:
+                self.fields['create_stock_check'].update()
+            except AssertionError:
+                pass
+            create_stock = False
+        else:
+            create_stock = self.fields['create_stock_check'].value
         for row in self.scanned_rows:
             row.create_stock = create_stock
+        self._update_results_table()
+
+    def _on_po_flow_changed(self, _):
+        """Toggle PO flow controls and keep stock controls consistent."""
+        po_enabled = bool(self.fields.get('po_flow_check').value)
+        self.fields['create_stock_check'].disabled = po_enabled
+        self.fields['assign_all_stock_items_location_check'].disabled = po_enabled
+
+        if po_enabled:
+            self.fields['create_stock_check'].value = False
+            self.fields['assign_all_stock_items_location_check'].value = False
+            for row in self.scanned_rows:
+                row.create_stock = False
+
+        try:
+            self.fields['create_stock_check'].update()
+            self.fields['assign_all_stock_items_location_check'].update()
+        except AssertionError:
+            pass
+
         self._update_results_table()
 
     def _clear_category_location(self, _):
@@ -1276,8 +2429,11 @@ class BarcodeImportView(MainView):
         self.fields['location_select'].value = None
 
         for row in self.scanned_rows:
-            row.category = ''
-            row.location = ''
+            if not int(getattr(row, 'part_pk', 0) or 0):
+                row.category = ''
+                row.location = ''
+            else:
+                row.location = ''
 
         try:
             self.fields['category_select'].update()
@@ -1290,6 +2446,8 @@ class BarcodeImportView(MainView):
     
     def _toggle_create_stock(self, idx: int):
         """Toggle create_stock for a specific row."""
+        if bool(self.fields.get('po_flow_check').value):
+            return
         if 0 <= idx < len(self.scanned_rows):
             self.scanned_rows[idx].create_stock = not self.scanned_rows[idx].create_stock
             self._update_results_table()
@@ -1383,6 +2541,45 @@ class BarcodeImportView(MainView):
 
     def _transfer_stock_items_bulk(self, transfer_items: List[Dict], location_pk: int) -> tuple[bool, str]:
         return _BarcodeApiHelpers.transfer_stock_items_bulk(self, transfer_items, location_pk)
+
+    def _resolve_supplier_company_pk(self, supplier_key: str) -> int:
+        return _BarcodeApiHelpers.resolve_supplier_company_pk(self, supplier_key)
+
+    def _list_open_purchase_orders(self, supplier_pk: int, limit: int = 50) -> List[Dict]:
+        return _BarcodeApiHelpers.list_open_purchase_orders(self, supplier_pk, limit)
+
+    def _find_open_purchase_order(self, supplier_pk: int, reference: str) -> Optional[Dict]:
+        return _BarcodeApiHelpers.find_open_purchase_order(self, supplier_pk, reference)
+
+    def _get_po_location_pk(self, po_data: Optional[Dict]) -> int:
+        return _BarcodeApiHelpers.get_po_location_pk(po_data)
+
+    def _create_purchase_order(self, supplier_pk: int, reference: str, location_pk: int = 0) -> tuple[Optional[Dict], str]:
+        return _BarcodeApiHelpers.create_purchase_order(self, supplier_pk, reference, location_pk)
+
+    def _find_po_line_for_part(self, po_pk: int, part_pk: int) -> Optional[Dict]:
+        return _BarcodeApiHelpers.find_po_line_for_part(self, po_pk, part_pk)
+
+    def _find_po_line_for_internal_part(self, po_pk: int, internal_part_pk: int) -> Optional[Dict]:
+        return _BarcodeApiHelpers.find_po_line_for_internal_part(self, po_pk, internal_part_pk)
+
+    def _create_po_line(self, po_pk: int, part_pk: int, quantity: int) -> tuple[Optional[Dict], str]:
+        return _BarcodeApiHelpers.create_po_line(self, po_pk, part_pk, quantity)
+
+    def _get_po_line_quantities(self, line_data: Optional[Dict]) -> tuple[int, int]:
+        return _BarcodeApiHelpers.get_po_line_quantities(line_data)
+
+    def _update_po_line_quantity(self, line_pk: int, quantity: int) -> tuple[bool, str]:
+        return _BarcodeApiHelpers.update_po_line_quantity(self, line_pk, quantity)
+
+    def _receive_po_line(self, line_pk: int, quantity: int, location_pk: int = 0) -> tuple[bool, str]:
+        return _BarcodeApiHelpers.receive_po_items(self, line_pk, [{'line_item': line_pk, 'quantity': quantity}], location_pk)
+
+    def _receive_po_items(self, po_pk: int, items: List[Dict], location_pk: int = 0) -> tuple[bool, str]:
+        return _BarcodeApiHelpers.receive_po_items(self, po_pk, items, location_pk)
+
+    def _trigger_po_action(self, po_pk: int, action: str) -> bool:
+        return _BarcodeApiHelpers.trigger_po_action(self, po_pk, action)
     
     def _on_submit(self, _):
         """Submit scanned items for import."""
@@ -1398,6 +2595,14 @@ class BarcodeImportView(MainView):
                     f'{row.supplier.upper()}: Could not extract part number'
                 )
                 return
+
+        # Reset transient caches before each run to avoid stale session state from
+        # suppressing valid lookups in long UI sessions.
+        with self._part_lookup_lock:
+            self._part_lookup_cache.clear()
+            self._part_lookup_inflight.clear()
+        self._supplier_company_cache.clear()
+        self._po_endpoint_cache.clear()
 
         self._show_status('Import running...', color='blue')
         self._execute_import()
@@ -1428,7 +2633,8 @@ class BarcodeImportView(MainView):
         failures = []
         rows_snapshot = list(self.scanned_rows)
         use_manufacturer_barcode = bool(self.fields['use_manufacturer_barcode_check'].value)
-        assign_all_stock_items_location = bool(self.fields.get('assign_all_stock_items_location_check').value)
+        po_flow_enabled = bool(self.fields.get('po_flow_check').value)
+        assign_all_stock_items_location = bool(self.fields.get('assign_all_stock_items_location_check').value) and not po_flow_enabled
         force_barcode_reassign = bool(self.fields.get('force_barcode_reassign_check').value)
 
         selected_location_value = str(self.fields.get('location_select').value or '').strip()
@@ -1437,11 +2643,15 @@ class BarcodeImportView(MainView):
         if assign_location_existing:
             selected_location_pk = self._get_stock_location_pk(selected_location_value)
             if selected_location_pk <= 0:
-                self.fields['import_progress_message'].value = 'Import failed: selected location could not be resolved'
-                self.fields['import_progress_message'].color = 'red'
-                self.fields['import_progress_message'].update()
-                self.show_dialog(DialogType.ERROR, f'Selected stock location not found: {selected_location_value}')
-                return
+                if po_flow_enabled:
+                    cprint(f'[BARCODE]\tSelected location ignored for PO flow: {selected_location_value}', silent=False)
+                    selected_location_pk = 0
+                else:
+                    self.fields['import_progress_message'].value = 'Import failed: selected location could not be resolved'
+                    self.fields['import_progress_message'].color = 'red'
+                    self.fields['import_progress_message'].update()
+                    self.show_dialog(DialogType.ERROR, f'Selected stock location not found: {selected_location_value}')
+                    return
 
         location_map: Dict[str, int] = {}
         location_map_lock = threading.Lock()
@@ -1457,7 +2667,11 @@ class BarcodeImportView(MainView):
                 'ok': False,
                 'failure': '',
                 'part_pk': 0,
+                'supplier_part_pk': 0,
                 'existing_part': False,
+                'po_supplier_key': str(row.supplier or '').strip().lower(),
+                'po_reference': str(getattr(row, 'supplier_order_reference', '') or '').strip(),
+                'po_quantity': max(1, int(row.quantity or 1)),
             }
 
             try:
@@ -1478,20 +2692,24 @@ class BarcodeImportView(MainView):
                     part_name = str(existing_part.get('name') or existing_part.get('IPN') or row.search_name or '').strip()
 
                     # Existing-part path: Assign workflow semantics.
-                    if assign_location_existing:
+                    if assign_location_existing and not po_flow_enabled:
                         set_ok = self._set_part_default_location(part_pk=part_pk, location_pk=selected_location_pk)
                         if not set_ok:
                             result['failure'] = f'{row.search_name}: default location update failed'
                             return result
 
-                    if part_name:
+                    barcode_target = ''
+                    if use_manufacturer_barcode:
+                        barcode_target = str(row.manufacturer_pn or row.barcode or '').strip()
+
+                    if barcode_target:
                         current_barcodes = self._fetch_part_barcodes(part_pk=part_pk)
                         current_barcodes_normalized = {
                             str(value or '').strip().lower()
                             for value in current_barcodes
                             if str(value or '').strip()
                         }
-                        if part_name.lower() in current_barcodes_normalized:
+                        if barcode_target.lower() in current_barcodes_normalized:
                             pass
                         elif current_barcodes and not force_barcode_reassign:
                             pass
@@ -1499,7 +2717,7 @@ class BarcodeImportView(MainView):
                             barcode_ok = False
                             for attempt in range(1, 4):
                                 try:
-                                    barcode_ok = self._link_part_barcode(part_pk=part_pk, barcode_value=part_name)
+                                    barcode_ok = self._link_part_barcode(part_pk=part_pk, barcode_value=barcode_target)
                                     if barcode_ok:
                                         break
                                     elif attempt < 3:
@@ -1509,11 +2727,23 @@ class BarcodeImportView(MainView):
                                     if attempt < 3:
                                         time.sleep(0.5)
                             if not barcode_ok:
-                                cprint(f'[WARN]\tBarcode reassignment failed for existing part {row.search_name} after retries', silent=False)
+                                cprint(
+                                    f'[WARN]\tBarcode reassignment failed for existing part {row.search_name} (barcode={barcode_target}) after retries',
+                                    silent=False,
+                                )
 
                     result['ok'] = True
                     result['part_pk'] = int(part_pk)
                     result['existing_part'] = True
+                    if po_flow_enabled:
+                        if str(row.supplier or '').strip().lower() == 'unknown':
+                            result['ok'] = False
+                            result['failure'] = f'{row.search_name}: PO flow requires known supplier'
+                            return result
+                        if not result['po_reference']:
+                            result['ok'] = False
+                            result['failure'] = f'{row.search_name}: missing supplier order reference for PO flow'
+                            return result
                     return result
 
                 supplier_name = self._resolve_supplier_key(row.supplier)
@@ -1547,7 +2777,7 @@ class BarcodeImportView(MainView):
                     part_form.pop('category_tree', None)
 
                 stock_payload = None
-                if row.create_stock:
+                if row.create_stock and not po_flow_enabled:
                     if not row.location:
                         pass
                     else:
@@ -1569,13 +2799,26 @@ class BarcodeImportView(MainView):
                             'make_default': False,
                         }
 
-                new_part, part_pk, _ = inventree_interface.inventree_create(
-                    part_info=part_form,
-                    kicad=False,
-                    show_progress=False,
-                    is_custom=False,
-                    stock=None,
-                )
+                with self._part_create_lock:
+                    new_part, part_pk, _ = inventree_interface.inventree_create(
+                        part_info=part_form,
+                        kicad=False,
+                        show_progress=False,
+                        is_custom=False,
+                        stock=None,
+                    )
+
+                if not part_pk:
+                    # If concurrent import created the same part first, try resolving it.
+                    existing_after_create = self._find_existing_part_for_row([
+                        row.search_name,
+                        row.manufacturer_pn,
+                        row.supplier_pn,
+                        row.raw_barcode,
+                        row.barcode,
+                    ])
+                    if existing_after_create:
+                        part_pk = int(existing_after_create.get('pk') or existing_after_create.get('id') or 0)
 
                 if not part_pk:
                     result['failure'] = f'{row.search_name}: Failed to create'
@@ -1598,6 +2841,25 @@ class BarcodeImportView(MainView):
 
                 result['ok'] = True
                 result['part_pk'] = int(part_pk)
+                if po_flow_enabled and not result['po_reference']:
+                    result['ok'] = False
+                    result['failure'] = f'{row.search_name}: missing supplier order reference for PO flow'
+                    return result
+
+                if po_flow_enabled:
+                    supplier_part = self._find_supplier_part_for_row([
+                        row.search_name,
+                        row.manufacturer_pn,
+                        row.supplier_pn,
+                        row.raw_barcode,
+                        row.barcode,
+                    ], row.supplier)
+                    if supplier_part:
+                        result['supplier_part_pk'] = int(supplier_part.get('supplier_part_pk') or 0)
+                        cprint(
+                            f"[BARCODE][PO]\tResolved supplier part: part_pk={result['part_pk']} supplier_part_pk={result['supplier_part_pk']} for {row.search_name}",
+                            silent=False,
+                        )
                 return result
             except Exception as exc:
                 result['failure'] = f'{row.search_name}: {str(exc)[:50]}'
@@ -1623,6 +2885,281 @@ class BarcodeImportView(MainView):
                 self.fields['import_progress'].update()
                 self.fields['import_progress_message'].value = f'Processed {completed}/{total}'
                 self.fields['import_progress_message'].update()
+
+        if po_flow_enabled:
+            po_candidates = [
+                item for item in row_results
+                if item.get('ok') and int(item.get('part_pk') or 0) > 0
+            ]
+            cprint(f'[BARCODE][PO]\tPO flow enabled: candidates={len(po_candidates)}', silent=False)
+            po_groups: Dict[tuple[str, str], Dict] = {}
+
+            for item in po_candidates:
+                supplier_key = str(item.get('po_supplier_key') or '').strip().lower()
+                po_ref = str(item.get('po_reference') or '').strip()
+                if not supplier_key or not po_ref:
+                    item['ok'] = False
+                    item['failure'] = f"{item['row'].search_name}: missing supplier/order reference for PO flow"
+                    cprint(f"[BARCODE][PO]\tMissing reference row={item['row'].search_name} supplier={supplier_key or '-'}", silent=False)
+                    continue
+
+                key = (supplier_key, po_ref.lower())
+                if key not in po_groups:
+                    po_groups[key] = {
+                        'items': [],
+                        'po_reference': po_ref,
+                    }
+                po_groups[key]['items'].append(item)
+
+            cprint(f'[BARCODE][PO]\tGrouped into {len(po_groups)} supplier/order buckets', silent=False)
+
+            for (supplier_key, _), group in po_groups.items():
+                po_ref = str(group.get('po_reference') or '').strip()
+                cprint(
+                    f"[BARCODE][PO]\tProcessing supplier={supplier_key} ref={po_ref} rows={len(group['items'])}",
+                    silent=False,
+                )
+                supplier_pk = self._resolve_supplier_company_pk(supplier_key)
+                if supplier_pk <= 0:
+                    detail = f'could not resolve supplier company for {supplier_key}'
+                    cprint(f'[BARCODE][PO]\t{detail}', silent=False)
+                    for item in group['items']:
+                        item['ok'] = False
+                        item['failure'] = f"{item['row'].search_name}: PO flow failed ({detail})"
+                    continue
+
+                open_pos = self._list_open_purchase_orders(supplier_pk=supplier_pk, limit=50)
+                if open_pos:
+                    po_summaries = [_BarcodeApiHelpers._po_summary(po) for po in open_pos[:8]]
+                    cprint(
+                        f"[BARCODE][PO]\tOpen editable POs for supplier_pk={supplier_pk}: count={len(open_pos)} -> {'; '.join(po_summaries)}",
+                        silent=False,
+                    )
+                else:
+                    cprint(f"[BARCODE][PO]\tOpen editable POs for supplier_pk={supplier_pk}: none", silent=False)
+
+                group_parts: Dict[int, int] = {}
+                unresolved_groups: Dict[int, Dict[str, Any]] = {}
+                for item in group['items']:
+                    supplier_part_pk = int(item.get('supplier_part_pk') or 0)
+                    part_pk = int(item.get('part_pk') or 0)
+                    if supplier_part_pk <= 0:
+                        row_obj = item.get('row')
+                        lookup_values = [
+                            getattr(row_obj, 'search_name', ''),
+                            getattr(row_obj, 'manufacturer_pn', ''),
+                            getattr(row_obj, 'supplier_pn', ''),
+                            getattr(row_obj, 'barcode', ''),
+                            getattr(row_obj, 'raw_barcode', ''),
+                        ]
+                        supplier_part_pk = self._resolve_supplier_part_pk(
+                            supplier_pk=supplier_pk,
+                            part_pk=part_pk,
+                            lookup_values=lookup_values,
+                        )
+
+                        if supplier_part_pk <= 0 and part_pk > 0:
+                            supplier_part_pk = self._create_supplier_part_link(
+                                supplier_pk=supplier_pk,
+                                part_pk=part_pk,
+                                lookup_values=lookup_values,
+                            )
+
+                        if supplier_part_pk > 0:
+                            item['supplier_part_pk'] = supplier_part_pk
+                            cprint(
+                                f"[BARCODE][PO]\tResolved supplier_part_pk in-group: row={item['row'].search_name} part_pk={part_pk} supplier_part_pk={supplier_part_pk}",
+                                silent=False,
+                            )
+
+                    if supplier_part_pk <= 0:
+                        row_qty = max(1, int(item.get('po_quantity') or 1))
+                        if part_pk > 0:
+                            group_data = unresolved_groups.setdefault(part_pk, {'qty': 0, 'items': []})
+                            group_data['qty'] = int(group_data.get('qty') or 0) + row_qty
+                            group_data['items'].append(item)
+                            cprint(
+                                f"[BARCODE][PO]\tMissing supplier_part_pk for row={item['row'].search_name} part_pk={part_pk}; deferring to existing PO line lookup",
+                                silent=False,
+                            )
+                        else:
+                            cprint(f"[BARCODE][PO]\tMissing supplier_part_pk for row={item['row'].search_name} part_pk={part_pk}", silent=False)
+                            item['ok'] = False
+                            item['failure'] = f"{item['row'].search_name}: missing supplier part for PO flow"
+                        continue
+
+                    group_parts[supplier_part_pk] = group_parts.get(supplier_part_pk, 0) + int(item.get('po_quantity') or 1)
+
+                cprint(
+                    f"[BARCODE][PO]\tResolved parts for supplier={supplier_key} ref={po_ref}: supplier_parts={len(group_parts)} unresolved_internal_parts={len(unresolved_groups)}",
+                    silent=False,
+                )
+
+                po_data = self._find_open_purchase_order(supplier_pk=supplier_pk, reference=po_ref)
+                po_created = False
+                if not po_data:
+                    cprint(
+                        f"[BARCODE][PO]\tFlow decision: CREATE new PO (no open PO matched supplier_pk={supplier_pk} ref={po_ref})",
+                        silent=False,
+                    )
+                    po_data, po_error = self._create_purchase_order(
+                        supplier_pk=supplier_pk,
+                        reference=po_ref,
+                        location_pk=selected_location_pk,
+                    )
+                    if not po_data:
+                        detail = po_error or 'failed to create purchase order'
+                        cprint(f"[BARCODE][PO]\tCreate PO failed supplier_pk={supplier_pk} ref={po_ref}: {detail}", silent=False)
+                        for item in group['items']:
+                            item['ok'] = False
+                            item['failure'] = f"{item['row'].search_name}: PO flow failed ({detail})"
+                        continue
+                    po_created = True
+                    cprint(f"[BARCODE][PO]\tCreated new PO supplier_pk={supplier_pk} ref={po_ref}", silent=False)
+                else:
+                    cprint(
+                        f"[BARCODE][PO]\tFlow decision: EDIT existing open PO supplier_pk={supplier_pk} ref={po_ref} ({_BarcodeApiHelpers._po_summary(po_data)})",
+                        silent=False,
+                    )
+
+                po_pk = int((po_data or {}).get('pk') or (po_data or {}).get('id') or 0)
+                if po_pk <= 0:
+                    cprint(f"[BARCODE][PO]\tInvalid PO id supplier_pk={supplier_pk} ref={po_ref}", silent=False)
+                    for item in group['items']:
+                        item['ok'] = False
+                        item['failure'] = f"{item['row'].search_name}: PO flow failed (invalid PO id)"
+                    continue
+
+                receive_location_pk = self._get_po_location_pk(po_data) or int(selected_location_pk or 0)
+
+                if po_created and unresolved_groups:
+                    detail = 'missing supplier part link for one or more rows (cannot add new PO lines without supplier_part_pk)'
+                    cprint(f"[BARCODE][PO]\t{detail}", silent=False)
+                    for group_data in unresolved_groups.values():
+                        for item in group_data.get('items') or []:
+                            item['ok'] = False
+                            item['failure'] = f"{item['row'].search_name}: PO flow failed ({detail})"
+                    unresolved_groups = {}
+
+                if not group_parts and not unresolved_groups:
+                    cprint(f"[BARCODE][PO]\tSkipping PO operations (no resolvable lines) supplier={supplier_key} ref={po_ref}", silent=False)
+                    continue
+
+                po_issued = self._trigger_po_action(po_pk, 'issue')
+                if po_issued:
+                    cprint(f"[BARCODE][PO]\tIssued PO pk={po_pk}", silent=False)
+                else:
+                    cprint(f"[BARCODE][PO]\tIssue step failed or PO already issued pk={po_pk}", silent=False)
+
+                part_errors: Dict[int, str] = {}
+                unresolved_item_errors: Dict[int, str] = {}
+                receive_items: List[Dict] = []
+                for supplier_part_pk, qty in group_parts.items():
+                    qty = max(1, int(qty or 1))
+                    po_line = self._find_po_line_for_part(po_pk=po_pk, part_pk=supplier_part_pk)
+                    if not po_line:
+                        po_line, line_error = self._create_po_line(po_pk=po_pk, part_pk=supplier_part_pk, quantity=qty)
+                        if not po_line:
+                            part_errors[supplier_part_pk] = line_error or 'failed to create PO line'
+                            cprint(f"[BARCODE][PO]\tCreate line failed po={po_pk} supplier_part={supplier_part_pk}: {part_errors[supplier_part_pk]}", silent=False)
+                            continue
+                        cprint(f"[BARCODE][PO]\tCreated line po={po_pk} supplier_part={supplier_part_pk} qty={qty}", silent=False)
+
+                    ordered_qty, received_qty = self._get_po_line_quantities(po_line)
+                    required_order_qty = max(int(ordered_qty or 0), int(received_qty or 0) + qty)
+
+                    line_pk = int((po_line or {}).get('pk') or (po_line or {}).get('id') or 0)
+                    if line_pk <= 0:
+                        part_errors[supplier_part_pk] = 'invalid PO line id'
+                        cprint(f"[BARCODE][PO]\tInvalid line id po={po_pk} supplier_part={supplier_part_pk}", silent=False)
+                        continue
+
+                    if required_order_qty > int(ordered_qty or 0):
+                        updated, update_error = self._update_po_line_quantity(
+                            line_pk=line_pk,
+                            quantity=required_order_qty,
+                        )
+                        if not updated:
+                            part_errors[supplier_part_pk] = update_error or 'failed to update PO line quantity'
+                            cprint(f"[BARCODE][PO]\tUpdate line qty failed line={line_pk} required={required_order_qty}: {part_errors[supplier_part_pk]}", silent=False)
+                            continue
+                        cprint(f"[BARCODE][PO]\tUpdated line={line_pk} ordered={ordered_qty}->{required_order_qty}", silent=False)
+
+                    receive_items.append({
+                        'line_item': line_pk,
+                        'quantity': qty,
+                        'packaging': (po_line or {}).get('packaging') or '',
+                        'batch_code': (po_line or {}).get('batch') or '',
+                    })
+
+                for internal_part_pk, group_data in unresolved_groups.items():
+                    qty = max(1, int(group_data.get('qty') or 1))
+                    po_line = self._find_po_line_for_internal_part(po_pk=po_pk, internal_part_pk=int(internal_part_pk))
+                    if not po_line:
+                        detail = f'no existing PO line found for part_pk={internal_part_pk}'
+                        cprint(f"[BARCODE][PO]\t{detail}", silent=False)
+                        for item in group_data.get('items') or []:
+                            unresolved_item_errors[int(item.get('idx') or 0)] = detail
+                        continue
+
+                    ordered_qty, received_qty = self._get_po_line_quantities(po_line)
+                    required_order_qty = max(int(ordered_qty or 0), int(received_qty or 0) + qty)
+                    line_pk = int((po_line or {}).get('pk') or (po_line or {}).get('id') or 0)
+                    if line_pk <= 0:
+                        detail = f'invalid PO line id for part_pk={internal_part_pk}'
+                        cprint(f"[BARCODE][PO]\t{detail}", silent=False)
+                        for item in group_data.get('items') or []:
+                            unresolved_item_errors[int(item.get('idx') or 0)] = detail
+                        continue
+
+                    if required_order_qty > int(ordered_qty or 0):
+                        updated, update_error = self._update_po_line_quantity(
+                            line_pk=line_pk,
+                            quantity=required_order_qty,
+                        )
+                        if not updated:
+                            detail = update_error or 'failed to update PO line quantity'
+                            cprint(f"[BARCODE][PO]\tUpdate line qty failed line={line_pk} required={required_order_qty}: {detail}", silent=False)
+                            for item in group_data.get('items') or []:
+                                unresolved_item_errors[int(item.get('idx') or 0)] = detail
+                            continue
+
+                    receive_items.append({
+                        'line_item': line_pk,
+                        'quantity': qty,
+                        'packaging': (po_line or {}).get('packaging') or '',
+                        'batch_code': (po_line or {}).get('batch') or '',
+                    })
+
+                if not part_errors and receive_items:
+                    received, recv_error = self._receive_po_items(
+                        po_pk=po_pk,
+                        items=receive_items,
+                        location_pk=receive_location_pk,
+                    )
+                    if not received:
+                        detail = recv_error or 'receive failed'
+                        cprint(f"[BARCODE][PO]\tReceive failed po={po_pk}: {detail}", silent=False)
+                        for item in group['items']:
+                            item['ok'] = False
+                            item['failure'] = f"{item['row'].search_name}: PO flow failed ({detail})"
+                        continue
+
+                    cprint(f"[BARCODE][PO]\tReceived PO pk={po_pk} items={len(receive_items)} location={receive_location_pk}", silent=False)
+
+                if not part_errors:
+                    self._trigger_po_action(po_pk, 'complete')
+                    cprint(f"[BARCODE][PO]\tCompleted PO pk={po_pk}", silent=False)
+
+                for item in group['items']:
+                    supplier_part_pk = int(item.get('supplier_part_pk') or 0)
+                    if supplier_part_pk in part_errors:
+                        item['ok'] = False
+                        item['failure'] = f"{item['row'].search_name}: PO flow failed ({part_errors[supplier_part_pk]})"
+                    item_idx = int(item.get('idx') or 0)
+                    if item_idx in unresolved_item_errors:
+                        item['ok'] = False
+                        item['failure'] = f"{item['row'].search_name}: PO flow failed ({unresolved_item_errors[item_idx]})"
 
         if assign_all_stock_items_location and selected_location_pk > 0:
             existing_success_rows = [

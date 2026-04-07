@@ -32,20 +32,47 @@ class BarcodeParser:
     Provides fallback to regex-based parsing for robustness.
     """
 
-    # ECIA field identifiers mapped to normalized field names
-    ECIA_FIELD_MAP = {
-        'K': 'customer_order_number',
-        '1K': 'supplier_order_number',
-        'P': 'supplier_part_number',
-        '1P': 'manufacturer_part_number',
-        '30P': 'supplier_part_number',
-        'Q': 'quantity',
-        '1V': 'manufacturer',
-        '4L': 'country_of_origin',
-        '1T': 'lot_code',
-        '9D': 'date_code',
-        '10D': 'date_code',
-    }
+    CUSTOMER_ORDER_NUMBER = 'customer_order_number'
+    SUPPLIER_ORDER_NUMBER = 'supplier_order_number'
+    PACKING_LIST_NUMBER = 'packing_list_number'
+    INVOICE_NUMBER = 'invoice_number'
+    SHIP_DATE = 'ship_date'
+    DATE_CODE = 'date_code'
+    PURCHASE_ORDER_LINE = 'purchase_order_line'
+    SUPPLIER_PART_NUMBER = 'supplier_part_number'
+    MANUFACTURER_PART_NUMBER = 'manufacturer_part_number'
+    COUNTRY_OF_ORIGIN = 'country_of_origin'
+    LOT_CODE = 'lot_code'
+    MANUFACTURER = 'manufacturer'
+    QUANTITY = 'quantity'
+
+    @classmethod
+    def ecia_field_map(cls):
+        """Return a dict mapping ECIA field names to internal field names.
+
+        Ref: https://www.ecianow.org/assets/docs/ECIA_Specifications.pdf
+
+        Note that a particular plugin may need to reimplement this method,
+        if it does not use the standard field names.
+        """
+        return {
+            'K': cls.CUSTOMER_ORDER_NUMBER,
+            '1K': cls.SUPPLIER_ORDER_NUMBER,
+            '11K': cls.PACKING_LIST_NUMBER,
+            '10K': cls.INVOICE_NUMBER,
+            '6D': cls.SHIP_DATE,
+            '9D': cls.DATE_CODE,
+            '10D': cls.DATE_CODE,
+            '4K': cls.PURCHASE_ORDER_LINE,
+            '14K': cls.PURCHASE_ORDER_LINE,
+            'P': cls.SUPPLIER_PART_NUMBER,
+            '1P': cls.MANUFACTURER_PART_NUMBER,
+            '30P': cls.SUPPLIER_PART_NUMBER,
+            '1T': cls.LOT_CODE,
+            '4L': cls.COUNTRY_OF_ORIGIN,
+            '1V': cls.MANUFACTURER,
+            'Q': cls.QUANTITY,
+        }
 
     @staticmethod
     def _normalize_gs1_input(barcode: str) -> str:
@@ -284,27 +311,52 @@ class BarcodeParser:
             Dict mapping field names to values (e.g., {'customer_order_number': '123', ...})
         """
         barcode_fields = {}
+        field_map = BarcodeParser.ecia_field_map()
+        identifiers = sorted(field_map.keys(), key=len, reverse=True)
+        identifier_pattern = re.compile('|'.join(re.escape(identifier) for identifier in identifiers))
 
         for field in fields:
-            if not field:
+            text = re.sub(r'^[\x1d\x1e]+|[\x1d\x1e]+$', '', str(field or '').strip())
+            if not text:
                 continue
 
-            # Try to match field identifiers from longest to shortest
-            # (e.g., try '30P' before 'P')
-            matched = False
-            for identifier in sorted(BarcodeParser.ECIA_FIELD_MAP.keys(), key=len, reverse=True):
-                if field.startswith(identifier):
-                    field_name = BarcodeParser.ECIA_FIELD_MAP[identifier]
-                    value = field[len(identifier):]
-                    barcode_fields[field_name] = value
-                    matched = True
-                    break
+            index = 0
+            while index < len(text):
+                matched_identifier = None
+                for identifier in identifiers:
+                    if text.startswith(identifier, index):
+                        matched_identifier = identifier
+                        break
 
-            # If no standard identifier matched, skip (could be unknown or future fields)
-            if not matched:
-                pass
+                if not matched_identifier:
+                    index += 1
+                    continue
+
+                value_start = index + len(matched_identifier)
+                remaining = text[value_start:]
+                next_match = identifier_pattern.search(remaining)
+
+                if next_match:
+                    value_end = value_start + next_match.start()
+                else:
+                    value_end = len(text)
+
+                field_name = field_map[matched_identifier]
+                barcode_fields[field_name] = text[value_start:value_end]
+                index = value_end if value_end > index else value_start
 
         return barcode_fields
+
+    @staticmethod
+    def _extract_ecia_field_value(barcode: str, identifiers: List[str]) -> str:
+        """Extract the first matching ECIA field value from raw barcode text."""
+        data = str(barcode or '')
+        for identifier in identifiers:
+            pattern = rf'(?:^|\x1d|\x1e){re.escape(identifier)}([^\x1d\x1e]+)'
+            match = re.search(pattern, data)
+            if match:
+                return match.group(1).strip()
+        return ''
 
     @staticmethod
     def parse_mouser(barcode: str) -> Dict:
@@ -338,13 +390,15 @@ class BarcodeParser:
         # Extract normalized fields
         result.update(barcode_fields)
 
-        # Normalize to output format
         normalized = {
             'supplier': 'mouser',
             'barcode': result.get('manufacturer_part_number', ''),
             'supplier_pn': '',  # Mouser QR does NOT include supplier PN
             'manufacturer_pn': result.get('manufacturer_part_number', ''),
             'quantity': int(result.get('quantity', 0)) if result.get('quantity') else 0,
+            'order_number': result.get('supplier_order_number', '') or result.get('customer_order_number', ''),
+            'supplier_order_number': result.get('supplier_order_number', ''),
+            'customer_order_number': result.get('customer_order_number', ''),
             'raw_data': result
         }
 
@@ -361,12 +415,24 @@ class BarcodeParser:
         # Remove GS1 prefix
         data = barcode[5:] if barcode.startswith('[)>06') else barcode
 
-        # Manufacturer PN: P followed by part number ending with -P
-        mfn_match = re.search(r'P([A-Z0-9\-]+?-P)(?=[QK]|\d{2})', data)
+        barcode_fields = BarcodeParser.parse_ecia_fields([data])
+        order_number = (
+            barcode_fields.get('supplier_order_number')
+            or barcode_fields.get('customer_order_number')
+            or ''
+        )
+
+        result.update(barcode_fields)
+
+        # Manufacturer PN: preserve terminal '-P' before next ECIA token.
+        mfn_match = re.search(r'1?P([A-Z0-9\-]+?-P)(?=(?:30P|1K|10K|11K|4L|1V|Q|$))', data)
         if mfn_match:
             result['manufacturer_part_number'] = mfn_match.group(1)
 
         result['quantity'] = BarcodeParser._extract_compact_quantity(data)
+        if order_number:
+            result['customer_order_number'] = order_number
+            result['supplier_order_number'] = order_number
 
         normalized = {
             'supplier': 'mouser',
@@ -374,6 +440,9 @@ class BarcodeParser:
             'supplier_pn': '',
             'manufacturer_pn': result.get('manufacturer_part_number', ''),
             'quantity': int(result.get('quantity', 0)) if result.get('quantity') else 0,
+            'order_number': order_number,
+            'supplier_order_number': result.get('supplier_order_number', ''),
+            'customer_order_number': result.get('customer_order_number', ''),
             'raw_data': result
         }
 
@@ -401,14 +470,24 @@ class BarcodeParser:
         barcode_fields = BarcodeParser.parse_ecia_fields(fields)
         result.update(barcode_fields)
 
-        # Normalize to output format
+        # Always include supplier_order_number from 1K/K field if present
+        supplier_order_number = result.get('supplier_order_number', '')
+        if not supplier_order_number:
+            # Try to extract from ECIA fields if missing
+            supplier_order_number = result.get('customer_order_number', '')
+
+        supplier_part_number = result.get('supplier_part_number', '') or result.get('customer_order_number', '')
+
         normalized = {
             'supplier': 'digikey',
-            'barcode': result.get('manufacturer_part_number', '') or result.get('customer_order_number', ''),
-            'supplier_pn': result.get('customer_order_number', ''),  # Digi-Key ID from first P field
-            'digikey_pn': result.get('customer_order_number', ''),
+            'barcode': result.get('manufacturer_part_number', '') or supplier_part_number,
+            'supplier_pn': supplier_part_number,
+            'digikey_pn': supplier_part_number,
             'manufacturer_pn': result.get('manufacturer_part_number', ''),
             'quantity': int(result.get('quantity', 0)) if result.get('quantity') else 0,
+            'order_number': supplier_order_number or result.get('customer_order_number', ''),
+            'supplier_order_number': supplier_order_number,
+            'customer_order_number': result.get('customer_order_number', ''),
             'raw_data': result
         }
 
@@ -425,25 +504,41 @@ class BarcodeParser:
         # Remove GS1 prefix
         data = barcode[5:] if barcode.startswith('[)>06') else barcode
 
+        barcode_fields = BarcodeParser.parse_ecia_fields([data])
+        order_number = (
+            barcode_fields.get('supplier_order_number')
+            or barcode_fields.get('customer_order_number')
+            or ''
+        )
+
+        result.update(barcode_fields)
+
         # Digi-Key part number: P followed by alphanumerics ending with -ND
         dk_pn_match = re.search(r'P([A-Z0-9]{2,}-ND)', data)
         if dk_pn_match:
-            result['customer_order_number'] = dk_pn_match.group(1)
+            result['supplier_part_number'] = dk_pn_match.group(1)
+            result['digikey_pn'] = dk_pn_match.group(1)
 
-        # Manufacturer PN: 1P followed by part number
-        mfn_match = re.search(r'1P([A-Z0-9\-]+?-P)(?=\d{2})', data)
+        # Manufacturer PN: preserve terminal '-P' before next ECIA token.
+        mfn_match = re.search(r'1P([A-Z0-9\-]+?-P)(?=(?:30P|1K|10K|11K|4L|1V|Q|$))', data)
         if mfn_match:
             result['manufacturer_part_number'] = mfn_match.group(1)
 
         result['quantity'] = BarcodeParser._extract_compact_quantity(data)
+        if order_number:
+            result['supplier_order_number'] = order_number
+            result['customer_order_number'] = order_number
 
         normalized = {
             'supplier': 'digikey',
-            'barcode': result.get('manufacturer_part_number', '') or result.get('customer_order_number', ''),
-            'supplier_pn': result.get('customer_order_number', ''),
-            'digikey_pn': result.get('customer_order_number', ''),
+            'barcode': result.get('manufacturer_part_number', '') or result.get('supplier_part_number', ''),
+            'supplier_pn': result.get('supplier_part_number', ''),
+            'digikey_pn': result.get('supplier_part_number', ''),
             'manufacturer_pn': result.get('manufacturer_part_number', ''),
             'quantity': int(result.get('quantity', 0)) if result.get('quantity') else 0,
+            'order_number': result.get('supplier_order_number', '') or result.get('customer_order_number', ''),
+            'supplier_order_number': result.get('supplier_order_number', ''),
+            'customer_order_number': result.get('customer_order_number', ''),
             'raw_data': result
         }
 
