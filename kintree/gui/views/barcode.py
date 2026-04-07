@@ -80,6 +80,7 @@ class BarcodeScannedRow:
         self.status = 'Checking...'
         self.part_pk: Optional[int] = None
         self.part_name = ''
+        self.supplierpart_pk: Optional[int] = None  # PK of SupplierPart (if part has this supplier)
         self.default_location_pk = 0
         self.has_barcode = False
         self.barcode_hash = ''
@@ -258,7 +259,38 @@ class _BarcodeApiHelpers:
         return str(location_id)
 
     @staticmethod
-    def fetch_part_barcodes(ctx, part_pk: int) -> List[str]:
+    def fetch_part_barcodes(
+        ctx,
+        entity_pk: int,
+        entity_type: str = 'part',
+        part_obj: Optional[Dict] = None,
+    ) -> List[str]:
+        """Fetch barcodes assigned to a Part or SupplierPart.
+
+        Args:
+            ctx: View context with retry helpers
+            entity_pk: PK of the target entity
+            entity_type: 'part' or 'supplierpart'
+            part_obj: Optional part/supplierpart payload (used to inspect barcode_hash)
+        """
+        # If we have the object, check its barcode_hash first.
+        # This works for both Part and SupplierPart entities.
+        if part_obj and isinstance(part_obj, dict):
+            barcode_hash = part_obj.get('barcode_hash')
+            # For API responses with nested structure, check the "instance" key
+            if not barcode_hash:
+                instance = part_obj.get('instance') or part_obj.get('supplierpart', {}).get('instance')
+                if isinstance(instance, dict):
+                    barcode_hash = instance.get('barcode_hash')
+            
+            if barcode_hash and str(barcode_hash).strip():
+                # Entity has a barcode assigned (indicated by barcode_hash)
+                cprint(
+                    f'[BARCODE]\t[DEBUG] {entity_type} {entity_type}_pk={entity_pk} has barcode_hash={barcode_hash} indicating barcode is assigned',
+                    silent=False,
+                )
+                return ['__BARCODE_EXISTS__']  # Marker that entity has a barcode
+        
         api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
         if not api_obj:
             return []
@@ -306,12 +338,14 @@ class _BarcodeApiHelpers:
                     values.append(str(barcode_value))
             return values
 
+        target_param = 'supplierpart' if str(entity_type).strip().lower() == 'supplierpart' else 'part'
+
         try:
             response = ctx._request_with_retries(
                 method='GET',
                 url=endpoint,
                 headers=headers,
-                params={'part': part_pk, 'limit': 100},
+                params={target_param: entity_pk, 'limit': 100},
                 timeout=20,
             )
             if response is None:
@@ -344,15 +378,15 @@ class _BarcodeApiHelpers:
             for item in rows:
                 if not isinstance(item, dict):
                     continue
-                part_ref = item.get('part')
-                item_part_pk = None
-                if isinstance(part_ref, dict):
-                    item_part_pk = part_ref.get('pk') or part_ref.get('id')
+                entity_ref = item.get(target_param)
+                item_entity_pk = None
+                if isinstance(entity_ref, dict):
+                    item_entity_pk = entity_ref.get('pk') or entity_ref.get('id')
                 else:
-                    item_part_pk = part_ref
+                    item_entity_pk = entity_ref
 
                 try:
-                    if int(item_part_pk) != int(part_pk):
+                    if int(item_entity_pk) != int(entity_pk):
                         continue
                 except Exception:
                     continue
@@ -588,7 +622,7 @@ class _BarcodeApiHelpers:
             return True
 
     @staticmethod
-    def _response_excerpt(response: Optional[requests.Response], limit: int = 220) -> str:
+    def _response_excerpt(response: Optional[requests.Response], limit: int = 0) -> str:
         if response is None:
             return 'no response'
         try:
@@ -597,7 +631,7 @@ class _BarcodeApiHelpers:
             text = ''
         if not text:
             return f'HTTP {response.status_code}'
-        if len(text) > limit:
+        if limit and len(text) > limit:
             text = text[:limit] + '...'
         return f'HTTP {response.status_code} body={text}'
 
@@ -1274,6 +1308,455 @@ class _BarcodeApiHelpers:
 
         return False
 
+    @staticmethod
+    def get_barcode_assignment(ctx, barcode_value: str) -> Optional[Dict]:
+        """Get the current assignment of a barcode.
+        
+        Returns dict with entity type and ID if found, or None if unassigned.
+        e.g. {'entity_type': 'stockitem', 'pk': 123} or None
+        """
+        api_obj, token, base_url = _BarcodeApiHelpers._get_auth_context()
+        if not api_obj or not token or not base_url:
+            return None
+        
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+        
+        barcode_value = str(barcode_value or '').strip()
+        if not barcode_value:
+            return None
+        
+        # Query barcode endpoint to find existing assignment
+        try:
+            endpoint = f"{base_url.rstrip('/')}/api/barcode/"
+            response = ctx._request_with_retries(
+                method='GET',
+                url=endpoint,
+                headers=headers,
+                params={'data': barcode_value, 'limit': 10},
+                timeout=15,
+            )
+            
+            if response is None or response.status_code != 200:
+                return None
+            
+            payload = response.json()
+            rows = payload.get('results', []) if isinstance(payload, dict) else payload
+            
+            if not isinstance(rows, list):
+                return None
+            
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get('data', '')).strip() == barcode_value:
+                    # Found the barcode - check what it's assigned to
+                    for entity_type in ['stockitem', 'part', 'supplierpart', 'manufacturerpart', 'build', 'purchaseorder', 'returnorder', 'salesorder', 'salesordershipment', 'stocklocation']:
+                        entity_pk = item.get(entity_type)
+                        if entity_pk and int(entity_pk or 0) > 0:
+                            return {
+                                'entity_type': entity_type,
+                                'pk': int(entity_pk),
+                                'barcode_pk': item.get('pk') or item.get('id'),
+                            }
+            
+            return None
+        except Exception as exc:
+            cprint(f'[BARCODE]\tBarcode lookup failed: {str(exc)[:60]}', silent=False)
+            return None
+
+    @staticmethod
+    def unassign_barcode(ctx, entity_type: str, entity_pk: int, barcode_pk: Optional[int] = None) -> bool:
+        """Unassign a barcode from an entity using BarcodeUnassign endpoint.
+        
+        Args:
+            ctx: Context with _request_with_retries
+            entity_type: Type of entity (stockitem, part, etc.)
+            entity_pk: PK of the entity to unassign from
+            barcode_pk: Optional barcode PK (for efficiency)
+            
+        Returns:
+            True if unassignment succeeded, False otherwise
+        """
+        api_obj, token, base_url = _BarcodeApiHelpers._get_auth_context()
+        if not api_obj or not token or not base_url:
+            return False
+        
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+        
+        endpoint = f"{base_url.rstrip('/')}/api/barcode/unassign/"
+        payload = {
+            entity_type: int(entity_pk),
+        }
+        
+        response = ctx._request_with_retries(
+            method='POST',
+            url=endpoint,
+            headers=headers,
+            json=payload,
+            timeout=20,
+        )
+        
+        success = response is not None and response.status_code in [200, 201, 202, 204]
+        if success:
+            cprint(
+                f'[BARCODE]\tBarcode unassigned from {entity_type} pk={entity_pk}',
+                silent=False,
+            )
+        else:
+            msg = _BarcodeApiHelpers._response_excerpt(response)
+            cprint(
+                f'[BARCODE]\tBarcode unassignment failed for {entity_type} pk={entity_pk}: {msg}',
+                silent=False,
+            )
+        
+        return success
+
+    @staticmethod
+    def assign_barcodes_comprehensive(
+        ctx,
+        should_assign: bool,
+        part_pk: Optional[int] = None,
+        manufacturer_pn: Optional[str] = None,
+        part_name: Optional[str] = None,
+        part_obj: Optional[Dict] = None,
+        supplierpart_pk: Optional[int] = None,
+        supplier_pn: Optional[str] = None,
+    ) -> tuple[bool, str]:
+        """Comprehensive barcode assignment logic with conflict resolution.
+        
+        Assigns barcodes to Part (manufacturer part) and SupplierPart based on:
+        - Manufacturer PN / part name for Part
+        - Supplier PN for SupplierPart (only if supplier_pn is provided)
+        
+        Args:
+            ctx: Context object with _request_with_retries method
+            should_assign: Whether to perform barcode assignment
+            part_pk: Part ID for internal part barcode
+            manufacturer_pn: Manufacturer part number (used as barcode value for Part)
+            part_name: Fallback part name for barcode if manufacturer_pn not provided
+            supplierpart_pk: SupplierPart ID for supplier part barcode
+            supplier_pn: Supplier part number (used as barcode value for SupplierPart)
+            
+        Returns:
+            (success: bool, message: str) - True only if assignment was successful or not needed
+        """
+        if not should_assign:
+            cprint('[BARCODE]\t[DEBUG] Barcode assignment disabled, skipping', silent=False)
+            return True, ''
+        
+        assignment_succeeded = True
+        
+        # DEBUG: Log input parameters
+        cprint(
+            f'[BARCODE]\t[DEBUG] assign_barcodes_comprehensive called: part_pk={part_pk} manufacturer_pn={manufacturer_pn} part_name={part_name} supplierpart_pk={supplierpart_pk} supplier_pn={supplier_pn}',
+            silent=False,
+        )
+        
+        # Assign Part barcode
+        if part_pk and part_pk > 0:
+            barcode_value = str(manufacturer_pn or part_name or '').strip()
+            cprint(
+                f'[BARCODE]\t[DEBUG] Part assignment: part_pk={part_pk} trying barcode_value="{barcode_value}" (from manufacturer_pn="{manufacturer_pn}" or part_name="{part_name}")',
+                silent=False,
+            )
+            
+            if barcode_value:
+                # Check if Part already has this barcode
+                current_barcodes = _BarcodeApiHelpers.fetch_part_barcodes(
+                    ctx,
+                    part_pk,
+                    entity_type='part',
+                    part_obj=part_obj,
+                )
+                # Check if barcode already exists (either as actual value or as marker '__BARCODE_EXISTS__')
+                has_existing_barcode = '__BARCODE_EXISTS__' in current_barcodes
+                current_normalized = {
+                    str(b or '').strip().lower()
+                    for b in current_barcodes
+                    if str(b or '').strip() and b != '__BARCODE_EXISTS__'
+                }
+                
+                cprint(
+                    f'[BARCODE]\t[DEBUG] Part current barcodes: {list(current_barcodes)} (normalized: {current_normalized}) has_existing={has_existing_barcode}',
+                    silent=False,
+                )
+                
+                if has_existing_barcode or barcode_value.lower() in current_normalized:
+                    cprint(
+                        f'[BARCODE]\t[DEBUG] Part barcode already exists (detected via barcode_hash or direct match), skipping assignment',
+                        silent=False,
+                    )
+                elif barcode_value.lower() not in current_normalized:
+                    cprint(
+                        f'[BARCODE]\t[DEBUG] Part barcode "{barcode_value}" not in current list, proceeding with assignment',
+                        silent=False,
+                    )
+
+                    # Check for conflicts before first assignment attempt.
+                    existing_assignment = _BarcodeApiHelpers.get_barcode_assignment(ctx, barcode_value)
+                    if existing_assignment:
+                        entity_type = str(existing_assignment.get('entity_type') or '').strip().lower()
+                        entity_pk = int(existing_assignment.get('pk') or 0)
+
+                        cprint(
+                            f'[BARCODE]\t[DEBUG] Barcode "{barcode_value}" already assigned to {entity_type} pk={entity_pk}',
+                            silent=False,
+                        )
+
+                        if entity_type == 'part' and entity_pk == int(part_pk):
+                            cprint(
+                                f'[BARCODE]\t[DEBUG] Part barcode already linked to same part_pk={part_pk}, skipping',
+                                silent=False,
+                            )
+                            return assignment_succeeded, ''
+
+                        if entity_type == 'stockitem' and entity_pk > 0:
+                            cprint(
+                                f'[BARCODE]\tBarcode {barcode_value} assigned to stockitem pk={entity_pk}, unassigning...',
+                                silent=False,
+                            )
+                            if not _BarcodeApiHelpers.unassign_barcode(ctx, entity_type, entity_pk):
+                                assignment_succeeded = False
+                                cprint(
+                                    f'[BARCODE]\t[WARN] Failed to unassign barcode {barcode_value} from stockitem pk={entity_pk}',
+                                    silent=False,
+                                )
+                                return assignment_succeeded, ''
+                        elif entity_type and entity_pk > 0:
+                            assignment_succeeded = False
+                            cprint(
+                                f'[BARCODE]\t[WARN] Barcode {barcode_value} is assigned to {entity_type} pk={entity_pk}, refusing reassignment to part_pk={part_pk}',
+                                silent=False,
+                            )
+                            return assignment_succeeded, ''
+
+                    # Assign with one retry: re-check assignment in between and unassign stockitem conflicts.
+                    for attempt in [1, 2]:
+                        try:
+                            cprint(
+                                f'[BARCODE]\t[DEBUG] Calling inventree_api.link_barcode(barcode="{barcode_value}", part_pk={part_pk}) attempt={attempt}',
+                                silent=False,
+                            )
+                            assigned = inventree_interface.inventree_api.link_barcode(barcode=barcode_value, part_pk=part_pk)
+                            if assigned:
+                                cprint(
+                                    f'[BARCODE]\tPart barcode assigned: part_pk={part_pk} barcode={barcode_value}',
+                                    silent=False,
+                                )
+                                break
+
+                            if attempt == 1:
+                                retry_assignment = _BarcodeApiHelpers.get_barcode_assignment(ctx, barcode_value)
+                                retry_type = str((retry_assignment or {}).get('entity_type') or '').strip().lower()
+                                retry_pk = int((retry_assignment or {}).get('pk') or 0)
+                                if retry_type == 'part' and retry_pk == int(part_pk):
+                                    # Barcode already assigned to same part - not an error, skip
+                                    cprint(
+                                        f'[BARCODE]\t[DEBUG] Barcode {barcode_value} already assigned to part_pk={part_pk}, no reassignment needed',
+                                        silent=False,
+                                    )
+                                    break
+                                elif retry_type == 'stockitem' and retry_pk > 0:
+                                    cprint(
+                                        f'[BARCODE]\t[DEBUG] Retry prep: unassigning barcode {barcode_value} from stockitem pk={retry_pk}',
+                                        silent=False,
+                                    )
+                                    _BarcodeApiHelpers.unassign_barcode(ctx, retry_type, retry_pk)
+                                    continue
+
+                            assignment_succeeded = False
+                            cprint(
+                                f'[BARCODE]\tPart barcode assignment failed: part_pk={part_pk} barcode={barcode_value}',
+                                silent=False,
+                            )
+                        except Exception as exc:
+                            assignment_succeeded = False
+                            cprint(
+                                f'[BARCODE]\tPart barcode assignment exception: part_pk={part_pk} barcode={barcode_value}: {str(exc)[:60]}',
+                                silent=False,
+                            )
+                            break
+                else:
+                    cprint(
+                        f'[BARCODE]\t[DEBUG] Part barcode "{barcode_value}" already in current list or exists, skipping assignment',
+                        silent=False,
+                    )
+            else:
+                cprint(
+                    f'[BARCODE]\t[DEBUG] Part barcode_value is empty, skipping Part assignment',
+                    silent=False,
+                )
+        else:
+            cprint(
+                f'[BARCODE]\t[DEBUG] Invalid part_pk={part_pk}, skipping Part assignment',
+                silent=False,
+            )
+        
+        # Assign SupplierPart barcode (only if supplier_pn provided)
+        if supplier_pn and supplierpart_pk and supplierpart_pk > 0:
+            barcode_value = str(supplier_pn).strip()
+            cprint(
+                f'[BARCODE]\t[DEBUG] SupplierPart assignment: supplierpart_pk={supplierpart_pk} trying barcode_value="{barcode_value}" (from supplier_pn="{supplier_pn}")',
+                silent=False,
+            )
+            
+            # Fetch SupplierPart details to check barcode_hash
+            supplierpart_obj = None
+            api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+            if api_obj:
+                token = getattr(api_obj, 'token', None)
+                base_url = getattr(api_obj, 'base_url', '')
+                if token and base_url:
+                    endpoint = f"{base_url.rstrip('/')}/api/company/part/{int(supplierpart_pk)}/"
+                    headers = {
+                        'Authorization': f'Token {token}',
+                        'Accept': 'application/json',
+                    }
+                    try:
+                        response = ctx._request_with_retries(
+                            method='GET',
+                            url=endpoint,
+                            headers=headers,
+                            timeout=10,
+                        )
+                        if response and response.status_code == 200:
+                            supplierpart_obj = response.json()
+                    except Exception:
+                        supplierpart_obj = None
+            
+            # Check if SupplierPart already has this barcode
+            current_barcodes = _BarcodeApiHelpers.fetch_part_barcodes(
+                ctx,
+                supplierpart_pk,
+                entity_type='supplierpart',
+                part_obj=supplierpart_obj,
+            )
+            # Check if barcode already exists (either as actual value or as marker '__BARCODE_EXISTS__')
+            has_existing_barcode = '__BARCODE_EXISTS__' in current_barcodes
+            current_normalized = {
+                str(b or '').strip().lower()
+                for b in current_barcodes
+                if str(b or '').strip() and b != '__BARCODE_EXISTS__'
+            }
+
+            cprint(
+                f'[BARCODE]\t[DEBUG] SupplierPart current barcodes: {list(current_barcodes)} (normalized: {current_normalized}) has_existing={has_existing_barcode}',
+                silent=False,
+            )
+
+            if has_existing_barcode or barcode_value.lower() in current_normalized:
+                cprint(
+                    f'[BARCODE]\t[DEBUG] SupplierPart barcode already exists (detected via barcode_hash or direct match), skipping assignment',
+                    silent=False,
+                )
+            else:
+                cprint(
+                    f'[BARCODE]\t[DEBUG] SupplierPart barcode "{barcode_value}" not in current list, proceeding with assignment',
+                    silent=False,
+                )
+
+                # Check for conflicts before first assignment attempt.
+                existing_assignment = _BarcodeApiHelpers.get_barcode_assignment(ctx, barcode_value)
+                if existing_assignment:
+                    entity_type = str(existing_assignment.get('entity_type') or '').strip().lower()
+                    entity_pk = int(existing_assignment.get('pk') or 0)
+
+                    if entity_type == 'supplierpart' and entity_pk == int(supplierpart_pk):
+                        cprint(
+                            f'[BARCODE]\t[DEBUG] SupplierPart barcode already assigned to same supplierpart_pk={supplierpart_pk}, skipping',
+                            silent=False,
+                        )
+                        return assignment_succeeded, ''
+
+                    cprint(
+                        f'[BARCODE]\t[DEBUG] Barcode "{barcode_value}" already assigned to {entity_type} pk={entity_pk}',
+                        silent=False,
+                    )
+
+                    if entity_type == 'stockitem' and entity_pk > 0:
+                        cprint(
+                            f'[BARCODE]\tBarcode {barcode_value} assigned to stockitem pk={entity_pk}, unassigning...',
+                            silent=False,
+                        )
+                        if not _BarcodeApiHelpers.unassign_barcode(ctx, entity_type, entity_pk):
+                            assignment_succeeded = False
+                            cprint(
+                                f'[BARCODE]\t[WARN] Failed to unassign barcode {barcode_value} from stockitem pk={entity_pk}',
+                                silent=False,
+                            )
+                            return assignment_succeeded, ''
+                    elif entity_type and entity_pk > 0:
+                        assignment_succeeded = False
+                        cprint(
+                            f'[BARCODE]\t[WARN] Barcode {barcode_value} is assigned to {entity_type} pk={entity_pk}, refusing reassignment to supplierpart_pk={supplierpart_pk}',
+                            silent=False,
+                        )
+                        return assignment_succeeded, ''
+
+                # Assign with one retry: re-check assignment in between and unassign stockitem conflicts.
+                for attempt in [1, 2]:
+                    try:
+                        cprint(
+                            f'[BARCODE]\t[DEBUG] Calling inventree_api.link_barcode(barcode="{barcode_value}", supplierpart_pk={supplierpart_pk}) attempt={attempt}',
+                            silent=False,
+                        )
+                        assigned = inventree_interface.inventree_api.link_barcode(
+                            barcode=barcode_value,
+                            supplierpart_pk=supplierpart_pk,
+                        )
+                        if assigned:
+                            cprint(
+                                f'[BARCODE]\tSupplierPart barcode assigned: supplierpart_pk={supplierpart_pk} barcode={barcode_value}',
+                                silent=False,
+                            )
+                            break
+
+                        if attempt == 1:
+                            retry_assignment = _BarcodeApiHelpers.get_barcode_assignment(ctx, barcode_value)
+                            retry_type = str((retry_assignment or {}).get('entity_type') or '').strip().lower()
+                            retry_pk = int((retry_assignment or {}).get('pk') or 0)
+                            if retry_type == 'supplierpart' and retry_pk == int(supplierpart_pk):
+                                # Barcode already assigned to same supplierpart - not an error, skip
+                                cprint(
+                                    f'[BARCODE]\t[DEBUG] Barcode {barcode_value} already assigned to supplierpart_pk={supplierpart_pk}, no reassignment needed',
+                                    silent=False,
+                                )
+                                break
+                            elif retry_type == 'stockitem' and retry_pk > 0:
+                                cprint(
+                                    f'[BARCODE]\t[DEBUG] Retry prep: unassigning barcode {barcode_value} from stockitem pk={retry_pk}',
+                                    silent=False,
+                                )
+                                _BarcodeApiHelpers.unassign_barcode(ctx, retry_type, retry_pk)
+                                continue
+
+                        assignment_succeeded = False
+                        cprint(
+                            f'[BARCODE]\tSupplierPart barcode assignment failed: supplierpart_pk={supplierpart_pk} barcode={barcode_value}',
+                            silent=False,
+                        )
+                    except Exception as exc:
+                        assignment_succeeded = False
+                        cprint(
+                            f'[BARCODE]\tSupplierPart barcode assignment exception: supplierpart_pk={supplierpart_pk} barcode={barcode_value}: {str(exc)[:60]}',
+                            silent=False,
+                        )
+                        break
+        else:
+            cprint(
+                f'[BARCODE]\t[DEBUG] SupplierPart assignment skipped: supplier_pn={supplier_pn} supplierpart_pk={supplierpart_pk}',
+                silent=False,
+            )
+        
+        return assignment_succeeded, ''
+
 
 class BarcodeImportView(MainView):
     """Barcode scanner and import view for Ki-nTree.
@@ -1444,14 +1927,9 @@ class BarcodeImportView(MainView):
         )
 
         self.fields['use_manufacturer_barcode_check'] = ft.Checkbox(
-            label='Use manufacturer PN as barcode',
+            label='Use label PN/MPN as barcodes',
             value=True,
             on_change=lambda _: self._update_results_table(),
-        )
-
-        self.fields['force_barcode_reassign_check'] = ft.Checkbox(
-            label='Force barcode reassignments (overwrite existing)',
-            value=False,
         )
 
         self.fields['assign_all_stock_items_location_check'] = ft.Checkbox(
@@ -1529,7 +2007,6 @@ class BarcodeImportView(MainView):
                             
                             ft.Text('Barcode & Existing Part Options:', style=ft.TextThemeStyle.BODY_MEDIUM),
                             self.fields['use_manufacturer_barcode_check'],
-                            self.fields['force_barcode_reassign_check'],
                             
                             ft.Text('Stock Item Location:', style=ft.TextThemeStyle.BODY_MEDIUM),
                             self.fields['assign_all_stock_items_location_check'],
@@ -1741,6 +2218,11 @@ class BarcodeImportView(MainView):
         self._last_scan_ts = now
 
         parsed = self.parser.parse(normalized)
+        cprint(
+            f'[BARCODE]\t[DEBUG] Barcode parsed: supplier={parsed.get("supplier")} manufacturer_pn="{parsed.get("manufacturer_pn")}" supplier_pn="{parsed.get("supplier_pn")}" barcode="{parsed.get("barcode")}"',
+            silent=False,
+        )
+        
         if parsed.get('supplier') == 'unknown':
             # Accept raw codes so existing parts can still be resolved server-side.
             parsed = {
@@ -1750,6 +2232,10 @@ class BarcodeImportView(MainView):
                 'barcode': normalized,
                 'quantity': 1,
             }
+            cprint(
+                f'[BARCODE]\t[DEBUG] Unknown supplier fallback: supplier_pn="{normalized}" manufacturer_pn="{normalized}"',
+                silent=False,
+            )
 
         row = BarcodeScannedRow(normalized, parsed)
         self.scanned_rows.append(row)
@@ -2015,10 +2501,11 @@ class BarcodeImportView(MainView):
                         or candidate.get('supplier_sku')
                         or candidate.get('part_number')
                         or ''
-                    ).strip().lower()
+                    ).strip()
 
                     probe_lower = probe.lower()
-                    if probe_lower and supplier_part_number and probe_lower in supplier_part_number:
+                    supplier_part_number_lower = supplier_part_number.lower()
+                    if probe_lower and supplier_part_number_lower and probe_lower in supplier_part_number_lower:
                         return {
                             'supplier_part_pk': candidate_pk,
                             'part_pk': part_pk,
@@ -2036,6 +2523,109 @@ class BarcodeImportView(MainView):
                     }
         except Exception:
             return None
+
+        return None
+
+    def _get_supplier_part_for_part(self, supplier_key: str, part_pk: int) -> Optional[Dict]:
+        """Fetch supplier-part for an existing part using exact part+supplier filters.
+
+        This is faster and more reliable than search-probe matching for cases where
+        parser output is partial (e.g. truncated Mouser manufacturer PN values).
+        """
+        if int(part_pk or 0) <= 0:
+            return None
+
+        supplier_norm = str(supplier_key or '').strip().lower()
+        supplier_pk = _BarcodeApiHelpers.resolve_supplier_company_pk(self, supplier_norm)
+        if supplier_pk <= 0:
+            return None
+
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        token = getattr(api_obj, 'token', None) if api_obj else None
+        base_url = getattr(api_obj, 'base_url', '') if api_obj else ''
+        if not token or not base_url:
+            return None
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+        endpoint = f"{base_url.rstrip('/')}/api/company/part/"
+
+        queries = [
+            {'supplier': int(supplier_pk), 'part': int(part_pk), 'primary': True, 'active': True, 'limit': 25, 'ordering': '-primary'},
+            {'supplier': int(supplier_pk), 'part': int(part_pk), 'active': True, 'limit': 25, 'ordering': '-primary'},
+            {'supplier': int(supplier_pk), 'part': int(part_pk), 'limit': 25, 'ordering': '-primary'},
+        ]
+
+        for params in queries:
+            response = self._request_with_retries(
+                method='GET',
+                url=endpoint,
+                headers=headers,
+                params=params,
+                timeout=20,
+            )
+            if response is None:
+                continue
+
+            try:
+                payload = response.json()
+                if isinstance(payload, dict):
+                    rows = payload.get('results') or []
+                elif isinstance(payload, list):
+                    rows = payload
+                else:
+                    rows = []
+            except Exception:
+                rows = []
+
+            if not rows:
+                continue
+
+            # Prefer primary row, then active row, then first valid row.
+            ranked = sorted(
+                [row for row in rows if isinstance(row, dict)],
+                key=lambda row: (
+                    0 if bool(row.get('primary')) else 1,
+                    0 if bool(row.get('active', True)) else 1,
+                    0 if str(row.get('SKU') or row.get('sku') or row.get('supplier_part_number') or '').strip() else 1,
+                ),
+            )
+
+            for candidate in ranked:
+                try:
+                    candidate_pk = int(candidate.get('pk') or candidate.get('id') or 0)
+                except Exception:
+                    candidate_pk = 0
+                if candidate_pk <= 0:
+                    continue
+
+                supplier_part_number = str(
+                    candidate.get('SKU')
+                    or candidate.get('sku')
+                    or candidate.get('supplier_part_number')
+                    or candidate.get('supplier_sku')
+                    or candidate.get('part_number')
+                    or ''
+                ).strip()
+
+                supplier_name = ''
+                supplier_detail = candidate.get('supplier_detail')
+                if isinstance(supplier_detail, dict):
+                    supplier_name = str(supplier_detail.get('name') or '').strip().lower()
+
+                cprint(
+                    f'[BARCODE]\t[DEBUG] Supplier-part exact fetch: supplier={supplier_norm} part_pk={part_pk} supplierpart_pk={candidate_pk} sku="{supplier_part_number}" primary={bool(candidate.get("primary"))}',
+                    silent=False,
+                )
+
+                return {
+                    'supplier_part_pk': candidate_pk,
+                    'part_pk': int(part_pk),
+                    'supplier_name': supplier_name,
+                    'supplier_part_number': supplier_part_number,
+                }
 
         return None
 
@@ -2295,6 +2885,31 @@ class BarcodeImportView(MainView):
 
             row.part_pk = int(part.get('pk') or part.get('id') or 0)
             row.part_name = str(part.get('name') or part.get('IPN') or row.search_name)
+            db_supplier_pn = ''
+            # Hydrate supplier_part_pk and supplier_pn for all known suppliers with SupplierPart support
+            if int(row.part_pk or 0) > 0 and str(row.supplier or '').strip().lower() != 'unknown':
+                supplier_match = self._get_supplier_part_for_part(row.supplier, row.part_pk)
+                # Fallback to probe-based search if exact query finds nothing
+                if not supplier_match:
+                    supplier_match = self._find_supplier_part_for_row(
+                        [
+                            row.search_name,
+                            row.manufacturer_pn,
+                            row.supplier_pn,
+                            row.raw_barcode,
+                            row.barcode,
+                        ],
+                        row.supplier,
+                    )
+                if supplier_match:
+                    row.supplierpart_pk = supplier_match.get('supplier_part_pk')
+                    db_supplier_pn = str(supplier_match.get('supplier_part_number') or '').strip()
+                    if db_supplier_pn and not str(row.supplier_pn or '').strip():
+                        row.supplier_pn = db_supplier_pn
+            cprint(
+                f'[BARCODE]\t[DEBUG] Validation DB fetch: part_pk={row.part_pk} part_name="{row.part_name}" parsed_barcode="{row.barcode}" parsed_supplier_pn="{row.supplier_pn}" parsed_manufacturer_pn="{row.manufacturer_pn}" db_supplier_pn="{db_supplier_pn}"',
+                silent=False,
+            )
             try:
                 row.default_location_pk = int(part.get('default_location') or 0)
             except Exception:
@@ -2533,6 +3148,27 @@ class BarcodeImportView(MainView):
     def _link_part_barcode(self, part_pk: int, barcode_value: str) -> bool:
         return _BarcodeApiHelpers.link_part_barcode(self, part_pk, barcode_value)
 
+    def _assign_barcodes_comprehensive(
+        self,
+        should_assign: bool,
+        part_pk: Optional[int] = None,
+        manufacturer_pn: Optional[str] = None,
+        part_name: Optional[str] = None,
+        part_obj: Optional[Dict] = None,
+        supplierpart_pk: Optional[int] = None,
+        supplier_pn: Optional[str] = None,
+    ) -> tuple[bool, str]:
+        return _BarcodeApiHelpers.assign_barcodes_comprehensive(
+            self,
+            should_assign=should_assign,
+            part_pk=part_pk,
+            manufacturer_pn=manufacturer_pn,
+            part_name=part_name,
+            part_obj=part_obj,
+            supplierpart_pk=supplierpart_pk,
+            supplier_pn=supplier_pn,
+        )
+
     def _fetch_part_barcodes(self, part_pk: int) -> List[str]:
         return _BarcodeApiHelpers.fetch_part_barcodes(self, part_pk)
 
@@ -2596,6 +3232,23 @@ class BarcodeImportView(MainView):
                 )
                 return
 
+        # Wait until all items have finished checking
+        self._show_status('Waiting for validation to complete...', color='orange')
+        max_wait_seconds = 120
+        check_interval = 0.2
+        elapsed = 0
+        while elapsed < max_wait_seconds:
+            all_done_checking = True
+            for row in self.scanned_rows:
+                status = str(getattr(row, 'status', '') or 'Queued').lower()
+                if status.startswith('checking'):
+                    all_done_checking = False
+                    break
+            if all_done_checking:
+                break
+            time.sleep(check_interval)
+            elapsed += check_interval
+
         # Reset transient caches before each run to avoid stale session state from
         # suppressing valid lookups in long UI sessions.
         with self._part_lookup_lock:
@@ -2635,7 +3288,6 @@ class BarcodeImportView(MainView):
         use_manufacturer_barcode = bool(self.fields['use_manufacturer_barcode_check'].value)
         po_flow_enabled = bool(self.fields.get('po_flow_check').value)
         assign_all_stock_items_location = bool(self.fields.get('assign_all_stock_items_location_check').value) and not po_flow_enabled
-        force_barcode_reassign = bool(self.fields.get('force_barcode_reassign_check').value)
 
         selected_location_value = str(self.fields.get('location_select').value or '').strip()
         assign_location_existing = bool(selected_location_value)
@@ -2657,6 +3309,11 @@ class BarcodeImportView(MainView):
         location_map_lock = threading.Lock()
         location_map_loaded = False
         row_results: List[Dict] = []
+        
+        # Track barcode assignments to avoid duplicates (part_pk -> barcode value)
+        # This prevents multiple threads from trying to assign the same barcode to the same part
+        barcode_assignments_processed: Dict[tuple[int, str], bool] = {}
+        barcode_assignments_lock = threading.Lock()
 
         def _process_import_row(idx: int, row: BarcodeScannedRow) -> Dict:
             nonlocal location_map_loaded
@@ -2690,6 +3347,31 @@ class BarcodeImportView(MainView):
                         return result
 
                     part_name = str(existing_part.get('name') or existing_part.get('IPN') or row.search_name or '').strip()
+                    db_supplier_pn = ''
+                    # Hydrate supplier_part_pk and supplier_pn for all known suppliers with SupplierPart support
+                    if str(row.supplier or '').strip().lower() != 'unknown':
+                        supplier_match = self._get_supplier_part_for_part(row.supplier, part_pk)
+                        # Fallback to probe-based search if exact query finds nothing
+                        if not supplier_match:
+                            supplier_match = self._find_supplier_part_for_row(
+                                [
+                                    row.search_name,
+                                    row.manufacturer_pn,
+                                    row.supplier_pn,
+                                    row.raw_barcode,
+                                    row.barcode,
+                                ],
+                                row.supplier,
+                            )
+                        if supplier_match:
+                            row.supplierpart_pk = supplier_match.get('supplier_part_pk')
+                            db_supplier_pn = str(supplier_match.get('supplier_part_number') or '').strip()
+                            if db_supplier_pn and not str(row.supplier_pn or '').strip():
+                                row.supplier_pn = db_supplier_pn
+                    cprint(
+                        f'[BARCODE]\t[DEBUG] Existing part fetched from DB: part_pk={part_pk} part_name="{part_name}" parsed_barcode="{row.barcode}" parsed_supplier_pn="{row.supplier_pn}" parsed_manufacturer_pn="{row.manufacturer_pn}" db_supplier_pn="{db_supplier_pn}"',
+                        silent=False,
+                    )
 
                     # Existing-part path: Assign workflow semantics.
                     if assign_location_existing and not po_flow_enabled:
@@ -2698,41 +3380,57 @@ class BarcodeImportView(MainView):
                             result['failure'] = f'{row.search_name}: default location update failed'
                             return result
 
-                    barcode_target = ''
-                    if use_manufacturer_barcode:
-                        barcode_target = str(row.manufacturer_pn or row.barcode or '').strip()
+                    # Assign barcodes using comprehensive logic (with deduplication)
+                    cprint(
+                        f'[BARCODE]\t[DEBUG] Existing part row calc: row.manufacturer_pn="{row.manufacturer_pn}" part_name="{part_name}" use_manufacturer_barcode={use_manufacturer_barcode}',
+                        silent=False,
+                    )
+                    # Use unified hydration (already set at line 3275 for all suppliers)
+                    supplierpart_pk_for_assignment = int(row.supplierpart_pk or 0)
+                    supplier_pn_for_assignment = str(row.supplier_pn or '').strip()
 
-                    if barcode_target:
-                        current_barcodes = self._fetch_part_barcodes(part_pk=part_pk)
-                        current_barcodes_normalized = {
-                            str(value or '').strip().lower()
-                            for value in current_barcodes
-                            if str(value or '').strip()
-                        }
-                        if barcode_target.lower() in current_barcodes_normalized:
-                            pass
-                        elif current_barcodes and not force_barcode_reassign:
-                            pass
-                        else:
-                            barcode_ok = False
-                            for attempt in range(1, 4):
-                                try:
-                                    barcode_ok = self._link_part_barcode(part_pk=part_pk, barcode_value=barcode_target)
-                                    if barcode_ok:
-                                        break
-                                    elif attempt < 3:
-                                        time.sleep(0.5)
-                                except Exception as exc:
-                                    cprint(f'[WARN]\tBarcode link retry {attempt} failed for "{row.search_name}": {str(exc)[:60]}', silent=False)
-                                    if attempt < 3:
-                                        time.sleep(0.5)
-                            if not barcode_ok:
+                    barcode_value_to_assign = str(row.manufacturer_pn or part_name or '').strip()
+                    cprint(
+                        f'[BARCODE]\t[DEBUG] Existing part barcode_value_to_assign="{barcode_value_to_assign}"',
+                        silent=False,
+                    )
+                    barcode_assignment_ok = True
+                    if use_manufacturer_barcode and barcode_value_to_assign:
+                        barcode_track_key = (part_pk, barcode_value_to_assign.lower())
+                        with barcode_assignments_lock:
+                            if barcode_track_key not in barcode_assignments_processed:
+                                barcode_assignments_processed[barcode_track_key] = True
+                                # This thread will handle the assignment
                                 cprint(
-                                    f'[WARN]\tBarcode reassignment failed for existing part {row.search_name} (barcode={barcode_target}) after retries',
+                                    f'[BARCODE]\t[DEBUG] First thread - proceeding with assignment for part_pk={part_pk} barcode="{barcode_value_to_assign}"',
                                     silent=False,
                                 )
+                                barcode_assignment_ok, _ = self._assign_barcodes_comprehensive(
+                                    should_assign=use_manufacturer_barcode,
+                                    part_pk=part_pk,
+                                    manufacturer_pn=row.manufacturer_pn,
+                                    part_name=part_name,
+                                    part_obj=existing_part,
+                                    supplierpart_pk=supplierpart_pk_for_assignment or None,
+                                    supplier_pn=supplier_pn_for_assignment or None,
+                                )
+                                cprint(
+                                    f'[BARCODE]\t[DEBUG] Barcode assignment result: success={barcode_assignment_ok}',
+                                    silent=False,
+                                )
+                            else:
+                                # Another thread already handled this, skip
+                                cprint(
+                                    f'[BARCODE]\tBarcode assignment already processed by another thread: part_pk={part_pk} barcode={barcode_value_to_assign}',
+                                    silent=False,
+                                )
+                    elif not use_manufacturer_barcode:
+                        cprint(
+                            '[BARCODE]\t[DEBUG] Barcode checkbox disabled, skipping part/supplierpart barcode assignment for existing part',
+                            silent=False,
+                        )
 
-                    result['ok'] = True
+                    result['ok'] = barcode_assignment_ok
                     result['part_pk'] = int(part_pk)
                     result['existing_part'] = True
                     if po_flow_enabled:
@@ -2819,6 +3517,10 @@ class BarcodeImportView(MainView):
                     ])
                     if existing_after_create:
                         part_pk = int(existing_after_create.get('pk') or existing_after_create.get('id') or 0)
+                        cprint(
+                            f'[BARCODE]\t[DEBUG] New part resolved from DB after create race: part_pk={part_pk} parsed_barcode="{row.barcode}" parsed_supplier_pn="{row.supplier_pn}" parsed_manufacturer_pn="{row.manufacturer_pn}"',
+                            silent=False,
+                        )
 
                 if not part_pk:
                     result['failure'] = f'{row.search_name}: Failed to create'
@@ -2832,14 +3534,76 @@ class BarcodeImportView(MainView):
                         result['failure'] = f'{row.search_name}: Failed to create stock'
                         return result
 
-                barcode_value = row.barcode if use_manufacturer_barcode else ''
-                if barcode_value:
-                    try:
-                        inventree_interface.inventree_api.link_barcode(barcode_value, part_pk=part_pk)
-                    except Exception as exc:
-                        cprint(f'[WARN]\tBarcode linking failed for {row.search_name}: {str(exc)}', silent=False)
+                # Assign barcodes using comprehensive logic (with deduplication)
+                cprint(
+                    f'[BARCODE]\t[DEBUG] New part row calc: row.manufacturer_pn="{row.manufacturer_pn}" row.search_name="{row.search_name}" use_manufacturer_barcode={use_manufacturer_barcode}',
+                    silent=False,
+                )
+                supplierpart_pk_for_assignment = 0
+                supplier_pn_for_assignment = str(row.supplier_pn or '').strip()
+                if use_manufacturer_barcode and str(row.supplier or '').strip().lower() != 'unknown':
+                    supplier_match = self._get_supplier_part_for_part(row.supplier, part_pk)
+                    if not supplier_match:
+                        supplier_match = self._find_supplier_part_for_row(
+                            [
+                                row.search_name,
+                                row.manufacturer_pn,
+                                row.supplier_pn,
+                                row.raw_barcode,
+                                row.barcode,
+                            ],
+                            row.supplier,
+                        )
+                    if supplier_match:
+                        supplierpart_pk_for_assignment = int(supplier_match.get('supplier_part_pk') or 0)
+                        if not supplier_pn_for_assignment:
+                            supplier_pn_for_assignment = str(supplier_match.get('supplier_part_number') or '').strip()
+                    cprint(
+                        f'[BARCODE]\t[DEBUG] New part supplier match: supplierpart_pk={supplierpart_pk_for_assignment} supplier_pn="{supplier_pn_for_assignment}"',
+                        silent=False,
+                    )
 
-                result['ok'] = True
+                barcode_value_to_assign = str(row.manufacturer_pn or row.search_name or '').strip()
+                cprint(
+                    f'[BARCODE]\t[DEBUG] New part barcode_value_to_assign="{barcode_value_to_assign}"',
+                    silent=False,
+                )
+                barcode_assignment_ok = True
+                if use_manufacturer_barcode and barcode_value_to_assign:
+                    barcode_track_key = (part_pk, barcode_value_to_assign.lower())
+                    with barcode_assignments_lock:
+                        if barcode_track_key not in barcode_assignments_processed:
+                            barcode_assignments_processed[barcode_track_key] = True
+                            # This thread will handle the assignment
+                            cprint(
+                                f'[BARCODE]\t[DEBUG] First thread - proceeding with assignment for part_pk={part_pk} barcode="{barcode_value_to_assign}"',
+                                silent=False,
+                            )
+                            barcode_assignment_ok, _ = self._assign_barcodes_comprehensive(
+                                should_assign=use_manufacturer_barcode,
+                                part_pk=part_pk,
+                                manufacturer_pn=row.manufacturer_pn,
+                                part_name=row.search_name,
+                                supplierpart_pk=supplierpart_pk_for_assignment or None,
+                                supplier_pn=supplier_pn_for_assignment or None,
+                            )
+                            cprint(
+                                f'[BARCODE]\t[DEBUG] Barcode assignment result: success={barcode_assignment_ok}',
+                                silent=False,
+                            )
+                        else:
+                            # Another thread already handled this, skip
+                            cprint(
+                                f'[BARCODE]\tBarcode assignment already processed by another thread: part_pk={part_pk} barcode={barcode_value_to_assign}',
+                                silent=False,
+                            )
+                elif not use_manufacturer_barcode:
+                    cprint(
+                        '[BARCODE]\t[DEBUG] Barcode checkbox disabled, skipping part/supplierpart barcode assignment for new part',
+                        silent=False,
+                    )
+
+                result['ok'] = barcode_assignment_ok
                 result['part_pk'] = int(part_pk)
                 if po_flow_enabled and not result['po_reference']:
                     result['ok'] = False
@@ -3351,10 +4115,6 @@ class BarcodeAssignmentView(MainView):
             label='Reassign external barcode using part name (not IPN)',
             value=False,
         )
-        self.fields['force_barcode_reassign_check'] = ft.Checkbox(
-            label='Force barcode reassignment if barcode already exists (skips if is already part name)',
-            value=False,
-        )
 
         self.fields['apply_assignments'] = ft.ElevatedButton(
             text='Apply To Valid Items',
@@ -3387,7 +4147,6 @@ class BarcodeAssignmentView(MainView):
                             self.fields['assign_location_check'],
                             self.fields['assign_all_stock_items_location_check'],
                             self.fields['reassign_name_barcode_check'],
-                            self.fields['force_barcode_reassign_check'],
                             ft.Divider(),
                             ft.Row([
                                 self.fields['apply_assignments'],
@@ -3996,6 +4755,27 @@ class BarcodeAssignmentView(MainView):
     def _link_part_barcode(self, part_pk: int, barcode_value: str) -> bool:
         return _BarcodeApiHelpers.link_part_barcode(self, part_pk, barcode_value)
 
+    def _assign_barcodes_comprehensive(
+        self,
+        should_assign: bool,
+        part_pk: Optional[int] = None,
+        manufacturer_pn: Optional[str] = None,
+        part_name: Optional[str] = None,
+        part_obj: Optional[Dict] = None,
+        supplierpart_pk: Optional[int] = None,
+        supplier_pn: Optional[str] = None,
+    ) -> tuple[bool, str]:
+        return _BarcodeApiHelpers.assign_barcodes_comprehensive(
+            self,
+            should_assign=should_assign,
+            part_pk=part_pk,
+            manufacturer_pn=manufacturer_pn,
+            part_name=part_name,
+            part_obj=part_obj,
+            supplierpart_pk=supplierpart_pk,
+            supplier_pn=supplier_pn,
+        )
+
     @staticmethod
     def _location_leaf(location: str) -> str:
         """Return only the last path segment for location display."""
@@ -4091,7 +4871,6 @@ class BarcodeAssignmentView(MainView):
         apply_location = bool(self.fields['assign_location_check'].value)
         apply_stock_items_location = bool(self.fields['assign_all_stock_items_location_check'].value)
         reassign_barcode = bool(self.fields['reassign_name_barcode_check'].value)
-        force_reassign = bool(self.fields['force_barcode_reassign_check'].value)
 
         if apply_stock_items_location:
             # Stock item location assignment requires a selected location.
@@ -4155,24 +4934,18 @@ class BarcodeAssignmentView(MainView):
                         row_failures.append(f'{row.part_name}: stock location assignment failed (invalid location)')
 
                 if reassign_barcode and row.part_name:
-                    if row.has_barcode and not force_reassign:
-                        cprint(f'[ASSIGN]\t  Row {idx}: barcode exists, skipped', silent=False)
-                    else:
-                        current_barcodes_normalized = {
-                            str(value or '').strip().lower()
-                            for value in (row.current_barcodes or [])
-                            if str(value or '').strip()
-                        }
-                        if row.part_name.strip().lower() in current_barcodes_normalized:
-                            cprint(f'[ASSIGN]\t  Row {idx}: barcode already matches part name, skipped', silent=False)
-                        else:
-                            ts_barcode = time.perf_counter()
-                            barcode_ok = self._link_part_barcode(row.part_pk, row.part_name)
-                            elapsed_barcode = (time.perf_counter() - ts_barcode) * 1000.0
-                            cprint(f'[ASSIGN]\t  Row {idx}: barcode link ({elapsed_barcode:.1f} ms)', silent=False)
-                            if not barcode_ok:
-                                row_ok = False
-                                row_failures.append(f'{row.part_name}: barcode reassignment failed')
+                    # Use comprehensive barcode assignment logic
+                    self._assign_barcodes_comprehensive(
+                        should_assign=True,
+                        part_pk=row.part_pk,
+                        manufacturer_pn=None,  # Not available in assignment view
+                        part_name=row.part_name,
+                        supplierpart_pk=None,
+                        supplier_pn=None,
+                    )
+                    ts_barcode = time.perf_counter()
+                    elapsed_barcode = (time.perf_counter() - ts_barcode) * 1000.0
+                    cprint(f'[ASSIGN]\t  Row {idx}: barcode assignment ({elapsed_barcode:.1f} ms)', silent=False)
             except Exception as exc:
                 row_ok = False
                 row_failures.append(f'{row.part_name or row.lookup_value}: {str(exc)[:60]}')

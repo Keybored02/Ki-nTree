@@ -309,11 +309,20 @@ class BarcodeParser:
 
         Returns:
             Dict mapping field names to values (e.g., {'customer_order_number': '123', ...})
+        
+        Note: When searching for next identifier, only looks for multi-char identifiers (1K, 1P, etc)
+        and the critical single-char 'Q' (quantity) to avoid false matches with single chars in part 
+        numbers (e.g., 'K' in 'K64F'). 'Q' is always a field delimiter and should end MFN values.
         """
         barcode_fields = {}
         field_map = BarcodeParser.ecia_field_map()
         identifiers = sorted(field_map.keys(), key=len, reverse=True)
-        identifier_pattern = re.compile('|'.join(re.escape(identifier) for identifier in identifiers))
+        
+        # Multi-char identifiers + critical single-char 'Q' (quantity field always ends a value in ECIA)
+        boundary_identifiers = [i for i in identifiers if len(i) > 1 or i == 'Q']
+        
+        # Pattern for finding next field boundary
+        boundary_pattern = re.compile('|'.join(re.escape(identifier) for identifier in boundary_identifiers)) if boundary_identifiers else None
 
         for field in fields:
             text = re.sub(r'^[\x1d\x1e]+|[\x1d\x1e]+$', '', str(field or '').strip())
@@ -334,7 +343,9 @@ class BarcodeParser:
 
                 value_start = index + len(matched_identifier)
                 remaining = text[value_start:]
-                next_match = identifier_pattern.search(remaining)
+                
+                # Search for next field boundary (multi-char identifiers + 'Q')
+                next_match = boundary_pattern.search(remaining) if boundary_pattern else None
 
                 if next_match:
                     value_end = value_start + next_match.start()
@@ -390,11 +401,15 @@ class BarcodeParser:
         # Extract normalized fields
         result.update(barcode_fields)
 
+        # Use extracted supplier_part_number if available (from field 'P')
+        supplier_pn = result.get('supplier_part_number', '')
+        manufacturer_pn = result.get('manufacturer_part_number', '')
+        
         normalized = {
             'supplier': 'mouser',
-            'barcode': result.get('manufacturer_part_number', ''),
-            'supplier_pn': '',  # Mouser QR does NOT include supplier PN
-            'manufacturer_pn': result.get('manufacturer_part_number', ''),
+            'barcode': manufacturer_pn or supplier_pn or '',
+            'supplier_pn': supplier_pn,  # Use extracted 'P' field if present
+            'manufacturer_pn': manufacturer_pn,
             'quantity': int(result.get('quantity', 0)) if result.get('quantity') else 0,
             'order_number': result.get('supplier_order_number', '') or result.get('customer_order_number', ''),
             'supplier_order_number': result.get('supplier_order_number', ''),
@@ -434,11 +449,15 @@ class BarcodeParser:
             result['customer_order_number'] = order_number
             result['supplier_order_number'] = order_number
 
+        # Use extracted supplier_part_number if available
+        supplier_pn = result.get('supplier_part_number', '')
+        manufacturer_pn = result.get('manufacturer_part_number', '')
+
         normalized = {
             'supplier': 'mouser',
-            'barcode': result.get('manufacturer_part_number', ''),
-            'supplier_pn': '',
-            'manufacturer_pn': result.get('manufacturer_part_number', ''),
+            'barcode': manufacturer_pn or supplier_pn or '',
+            'supplier_pn': supplier_pn,  # Use extracted value if present
+            'manufacturer_pn': manufacturer_pn,
             'quantity': int(result.get('quantity', 0)) if result.get('quantity') else 0,
             'order_number': order_number,
             'supplier_order_number': result.get('supplier_order_number', ''),

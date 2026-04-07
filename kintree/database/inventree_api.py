@@ -827,7 +827,12 @@ def set_part_default_location(part_pk: int, location_pk: int):
     })
 
 
-def link_barcode(barcode: str, part_pk: int = None, stocklocation_pk: int = None) -> bool:
+def link_barcode(
+    barcode: str,
+    part_pk: int = None,
+    stocklocation_pk: int = None,
+    supplierpart_pk: int = None,
+) -> bool:
     """Link a barcode to an InvenTree object via /api/barcode/link/."""
     global inventree_api
 
@@ -842,6 +847,8 @@ def link_barcode(barcode: str, part_pk: int = None, stocklocation_pk: int = None
         payload['part'] = int(part_pk)
     if stocklocation_pk:
         payload['stocklocation'] = int(stocklocation_pk)
+    if supplierpart_pk:
+        payload['supplierpart'] = int(supplierpart_pk)
 
     if len(payload.keys()) == 1:
         cprint('[TREE]\tWarning: No barcode target provided', silent=settings.SILENT)
@@ -868,10 +875,10 @@ def link_barcode(barcode: str, part_pk: int = None, stocklocation_pk: int = None
             cprint(f'[TREE]\tSuccess: Barcode "{payload["barcode"]}" linked to part {part_pk}', silent=settings.SILENT)
             return True
 
-        # Log detailed error information for debugging
-        error_body = response.text[:500] if response.text else "(empty response)"
+        # Log detailed error information for debugging (no truncation)
+        error_body = response.text if response.text else "(empty response)"
         cprint(
-            f"[TREE]\tWarning: Barcode link failed (status={response.status_code}, barcode='{payload['barcode']}', part_pk={part_pk})",
+            f"[TREE]\tWarning: Barcode link failed (status={response.status_code}, barcode='{payload['barcode']}', part_pk={part_pk}, supplierpart_pk={supplierpart_pk})",
             silent=settings.SILENT,
         )
         cprint(f"[TREE]\tResponse: {error_body}", silent=settings.SILENT)
