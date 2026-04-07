@@ -57,10 +57,11 @@ class BarcodeScannedRow:
         # Determine search term based on supplier type.
         # Mouser: search by MFN (no supplier PN available in QR).
         # TME, LCSC, Digi-Key: search by supplier PN (preferred identifier).
-        if self.supplier == 'mouser':
-            self.search_name = self.manufacturer_pn or self.supplier_pn
-        else:
-            self.search_name = self.supplier_pn or self.manufacturer_pn
+        self.search_name = self.manufacturer_pn or self.supplier_pn if self.supplier == 'mouser' else self.supplier_pn or self.manufacturer_pn
+
+        # Match Assign display behavior: show resolved lookup for known suppliers.
+        self.lookup_value = parsed.get('barcode', '') or self.manufacturer_pn or self.supplier_pn or barcode
+        self.display_code = self.lookup_value if self.supplier != 'unknown' and self.lookup_value else barcode
         
         self.quantity = parsed.get('quantity', 1)
         
@@ -74,6 +75,15 @@ class BarcodeScannedRow:
         self.location = ''
         self.create_stock = False
         self.stock_quantity = self.quantity or 1
+
+        # Assign-style validation state for live table feedback.
+        self.status = 'Checking...'
+        self.part_pk: Optional[int] = None
+        self.part_name = ''
+        self.default_location_pk = 0
+        self.has_barcode = False
+        self.barcode_hash = ''
+        self.current_barcodes: List[str] = []
 
 
 class ExistingPartScanRow:
@@ -136,7 +146,13 @@ class BarcodeImportView(MainView):
         self._last_scan_code = ''
         self._last_scan_ts = 0.0
         self._recent_scan_codes: Dict[str, float] = {}
+        # Reuse one HTTP session for lookup requests, same as Assign view.
+        self._http = requests.Session()
+        self._barcode_endpoint_available: Optional[bool] = None
         self._connect_lock = threading.Lock()
+        self._part_lookup_cache: Dict[str, Optional[Dict]] = {}
+        self._part_lookup_lock = threading.Lock()
+        self._part_lookup_inflight: Dict[str, threading.Event] = {}
 
         # Call parent init
         super().__init__(page=page)
@@ -187,13 +203,14 @@ class BarcodeImportView(MainView):
         # Results table
         self.fields['results_table'] = ft.DataTable(
             columns=[
+                ft.DataColumn(ft.Text('Input Code')),
                 ft.DataColumn(ft.Text('Supplier')),
-                ft.DataColumn(ft.Text('Supplier PN')),
-                ft.DataColumn(ft.Text('MFN PN')),
+                ft.DataColumn(ft.Text('Status')),
+                ft.DataColumn(ft.Text('Part')),
+                ft.DataColumn(ft.Text('Location')),
                 ft.DataColumn(ft.Text('Barcode')),
                 ft.DataColumn(ft.Text('Qty')),
                 ft.DataColumn(ft.Text('Category')),
-                ft.DataColumn(ft.Text('Location')),
                 ft.DataColumn(ft.Text('Create Stock')),
                 ft.DataColumn(ft.Text('Remove')),
             ],
@@ -227,10 +244,22 @@ class BarcodeImportView(MainView):
             on_click=self._reload_categories,
         )
 
+        self.fields['clear_category_location_top'] = ft.IconButton(
+            icon=ft.icons.CLEAR,
+            tooltip='Clear category and location selections',
+            on_click=self._clear_category_location,
+        )
+
         self.fields['reload_locations'] = ft.IconButton(
             icon=ft.icons.REPLAY,
             tooltip='Reload stock locations from InvenTree',
             on_click=self._reload_locations,
+        )
+
+        self.fields['clear_category_location'] = ft.IconButton(
+            icon=ft.icons.CLEAR,
+            tooltip='Clear category and location selections',
+            on_click=self._clear_category_location,
         )
         
         # Create stock checkbox
@@ -244,6 +273,16 @@ class BarcodeImportView(MainView):
             label='Use manufacturer PN as barcode',
             value=True,
             on_change=lambda _: self._update_results_table(),
+        )
+
+        self.fields['force_barcode_reassign_check'] = ft.Checkbox(
+            label='Force barcode reassignments (overwrite existing)',
+            value=False,
+        )
+
+        self.fields['assign_all_stock_items_location_check'] = ft.Checkbox(
+            label='Assign selected location to all stock items of the part',
+            value=True,
         )
         
         # Submit button
@@ -296,16 +335,24 @@ class BarcodeImportView(MainView):
                                     ft.Row([
                                         self.fields['category_select'],
                                         self.fields['reload_categories'],
+                                        self.fields['clear_category_location_top'],
                                     ]),
                                     ft.Row([
                                         self.fields['location_select'],
                                         self.fields['reload_locations'],
+                                        self.fields['clear_category_location'],
                                     ]),
                                 ],
                                 spacing=8,
                             ),
                             self.fields['create_stock_check'],
+                            
+                            ft.Text('Barcode & Existing Part Options:', style=ft.TextThemeStyle.BODY_MEDIUM),
                             self.fields['use_manufacturer_barcode_check'],
+                            self.fields['force_barcode_reassign_check'],
+                            
+                            ft.Text('Stock Item Location:', style=ft.TextThemeStyle.BODY_MEDIUM),
+                            self.fields['assign_all_stock_items_location_check'],
                             
                             ft.Divider(),
                             
@@ -441,13 +488,21 @@ class BarcodeImportView(MainView):
     def _on_barcode_input_changed(self, _):
         """Auto-parse scanner input when newline terminator is received."""
         text = self.fields['barcode_input'].value or ''
+        normalized_text = text.replace('\r', '\n')
 
-        if '\n' not in text and '\r' not in text:
+        if '\n' not in normalized_text:
             return
 
-        lines = [line.strip() for line in text.replace('\r', '\n').split('\n') if line.strip()]
+        # Only parse completed, newline-terminated lines.
+        # Keep the trailing fragment in the field to avoid parsing partial scans.
+        has_trailing_newline = normalized_text.endswith('\n')
+        raw_lines = normalized_text.split('\n')
+        completed_lines = raw_lines if has_trailing_newline else raw_lines[:-1]
+        pending_tail = '' if has_trailing_newline else (raw_lines[-1] if raw_lines else '')
+
+        lines = [line.strip() for line in completed_lines if line.strip()]
         if not lines:
-            self.fields['barcode_input'].value = ''
+            self.fields['barcode_input'].value = pending_tail
             try:
                 self.fields['barcode_input'].update()
                 self.fields['barcode_input'].focus()
@@ -464,7 +519,7 @@ class BarcodeImportView(MainView):
                 failed += 1
 
         self._update_results_table()
-        self.fields['barcode_input'].value = ''
+        self.fields['barcode_input'].value = pending_tail
         try:
             self.fields['barcode_input'].update()
             self.fields['barcode_input'].focus()
@@ -490,7 +545,7 @@ class BarcodeImportView(MainView):
 
         now = time.monotonic()
         recent_ts = self._recent_scan_codes.get(normalized)
-        if recent_ts is not None and (now - recent_ts) < 0.5:
+        if recent_ts is not None and (now - recent_ts) < 1.5:
             cprint(f'[BARCODE]\tIgnored duplicate scan: {normalized}', silent=False)
             return False
 
@@ -500,13 +555,22 @@ class BarcodeImportView(MainView):
 
         parsed = self.parser.parse(normalized)
         if parsed.get('supplier') == 'unknown':
-            if update_status:
-                self._show_status('Unknown barcode format', color='red')
-                self.show_dialog(DialogType.ERROR, 'Unrecognized barcode format')
-            return False
+            # Accept raw codes so existing parts can still be resolved server-side.
+            parsed = {
+                'supplier': 'unknown',
+                'supplier_pn': normalized,
+                'manufacturer_pn': normalized,
+                'barcode': normalized,
+                'quantity': 1,
+            }
 
         row = BarcodeScannedRow(normalized, parsed)
         self.scanned_rows.append(row)
+
+        # Run Assign-style resolution checks in background for live status updates.
+        thread = threading.Thread(target=self._validate_import_row_async, args=(row,), daemon=True)
+        thread.start()
+
         if update_table:
             self._update_results_table()
         if update_status:
@@ -540,8 +604,6 @@ class BarcodeImportView(MainView):
     def _update_results_table(self):
         """Refresh the results table with current scanned items."""
         rows = []
-        use_manufacturer_barcode = self.fields.get('use_manufacturer_barcode_check', None)
-        show_barcode = bool(use_manufacturer_barcode.value) if use_manufacturer_barcode else True
 
         for idx, row in enumerate(self.scanned_rows):
             remove_btn = ft.IconButton(
@@ -549,40 +611,50 @@ class BarcodeImportView(MainView):
                 on_click=lambda _, i=idx: self._remove_row(i),
             )
 
+            input_code = self._truncate_text(str(getattr(row, 'display_code', '') or row.raw_barcode or '-'), max_len=70)
+            status_text = str(getattr(row, 'status', 'Queued') or 'Queued')
+            part_display = str(getattr(row, 'part_name', '') or '').strip()
+            part_pk = int(getattr(row, 'part_pk', 0) or 0)
+            if part_display and part_pk > 0:
+                part_text = f'{part_display} ({part_pk})'
+            elif part_display:
+                part_text = part_display
+            elif part_pk > 0:
+                part_text = f'Part ({part_pk})'
+            else:
+                part_text = str(row.search_name or row.manufacturer_pn or row.supplier_pn or '-')
+            location_text = self._truncate_text(str(row.location or '(default)'), max_len=70)
+            if row.current_barcodes:
+                barcode_display = ', '.join(row.current_barcodes[:2])
+                if len(row.current_barcodes) > 2:
+                    barcode_display += f' (+{len(row.current_barcodes) - 2})'
+                barcode_text = self._truncate_text(barcode_display, max_len=90)
+            else:
+                barcode_text = ''
+            qty_text = str(row.quantity) if row.supplier != 'unknown' else ''
+            category_text = self._truncate_text(str(row.category or ''), max_len=90)
+            part_text = self._truncate_text(part_text, max_len=100)
+            status_text = self._truncate_text(status_text, max_len=45)
+            status_lower = status_text.lower()
+            if status_lower.startswith('existing'):
+                status_color = 'green'
+            elif status_lower.startswith('new'):
+                status_color = 'blue'
+            elif status_lower.startswith('skipped') or status_lower.startswith('error') or status_lower.startswith('failed'):
+                status_color = 'red'
+            else:
+                status_color = 'orange'
+
             rows.append(ft.DataRow(
                 cells=[
-                    ft.DataCell(ft.Text(row.supplier.upper(), size=13, no_wrap=True)),
-                    ft.DataCell(
-                        ft.Text(
-                            row.supplier_pn or '-',
-                            selectable=True,
-                            no_wrap=True,
-                            overflow=ft.TextOverflow.ELLIPSIS,
-                            size=12,
-                        )
-                    ),
-                    ft.DataCell(
-                        ft.Text(
-                            row.manufacturer_pn or '-',
-                            selectable=True,
-                            no_wrap=True,
-                            overflow=ft.TextOverflow.ELLIPSIS,
-                            size=12,
-                        )
-                    ),
-                    ft.DataCell(
-                        ft.Text(
-                            row.barcode if show_barcode else '',
-                            selectable=True,
-                            no_wrap=True,
-                            overflow=ft.TextOverflow.ELLIPSIS,
-                            size=11,
-                            color='gray',
-                        )
-                    ),
-                    ft.DataCell(ft.Text(str(row.quantity), size=13, no_wrap=True)),
-                    ft.DataCell(ft.Text(row.category or '(default)', size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)),
-                    ft.DataCell(ft.Text(row.location or '(default)', size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)),
+                    ft.DataCell(ft.Text(input_code, size=12, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
+                    ft.DataCell(ft.Text(row.supplier.upper(), size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)),
+                    ft.DataCell(ft.Text(status_text, size=12, color=status_color, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
+                    ft.DataCell(ft.Text(part_text, size=12, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
+                    ft.DataCell(ft.Text(location_text, size=12, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
+                    ft.DataCell(ft.Text(barcode_text, size=11, color='gray', no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
+                    ft.DataCell(ft.Text(qty_text, size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)),
+                    ft.DataCell(ft.Text(category_text, size=12, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
                     ft.DataCell(ft.Checkbox(
                         value=row.create_stock,
                         on_change=lambda _, i=idx: self._toggle_create_stock(i),
@@ -592,7 +664,261 @@ class BarcodeImportView(MainView):
             ))
 
         self.fields['results_table'].rows = rows
-        self._page.update()
+        try:
+            self._page.update()
+        except AssertionError:
+            pass
+
+    @staticmethod
+    def _truncate_text(value: str, max_len: int = 30) -> str:
+        text = str(value or '')
+        if len(text) <= max_len:
+            return text
+        return text[:max_len - 3] + '...'
+
+    def _find_part_by_lookup(self, lookup_value: str) -> Optional[Dict]:
+        cache_key = str(lookup_value or '').strip().lower()
+        if not cache_key:
+            return None
+
+        with self._part_lookup_lock:
+            if cache_key in self._part_lookup_cache:
+                return self._part_lookup_cache[cache_key]
+
+            wait_event = self._part_lookup_inflight.get(cache_key)
+            is_leader = wait_event is None
+            if is_leader:
+                wait_event = threading.Event()
+                self._part_lookup_inflight[cache_key] = wait_event
+
+        if not is_leader:
+            wait_event.wait(timeout=20.0)
+            with self._part_lookup_lock:
+                return self._part_lookup_cache.get(cache_key)
+
+        result = None
+        try:
+            api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+            if not api_obj:
+                result = None
+            else:
+                token = getattr(api_obj, 'token', None)
+                base_url = getattr(api_obj, 'base_url', '')
+                if not token or not base_url:
+                    result = None
+                else:
+                    endpoint = f"{base_url.rstrip('/')}/api/part/"
+                    headers = {
+                        'Authorization': f'Token {token}',
+                        'Accept': 'application/json',
+                    }
+                    response = self._request_with_retries(
+                        method='GET',
+                        url=endpoint,
+                        headers=headers,
+                        params={'search': lookup_value, 'limit': 5},
+                        timeout=20,
+                    )
+                    if response is not None:
+                        payload = response.json()
+
+                        if isinstance(payload, dict):
+                            rows = payload.get('results') or []
+                        elif isinstance(payload, list):
+                            rows = payload
+                        else:
+                            rows = []
+
+                        if rows:
+                            needle = lookup_value.strip().lower()
+                            for candidate in rows:
+                                ipn = str(candidate.get('IPN') or '').strip().lower()
+                                name = str(candidate.get('name') or '').strip().lower()
+                                if needle and (needle == ipn or needle == name):
+                                    result = candidate
+                                    break
+                            if result is None:
+                                result = rows[0]
+        except Exception:
+            result = None
+        finally:
+            with self._part_lookup_lock:
+                self._part_lookup_cache[cache_key] = result
+                inflight_event = self._part_lookup_inflight.pop(cache_key, None)
+                if inflight_event is not None:
+                    inflight_event.set()
+
+        return result
+
+    def _find_existing_part_for_row(self, lookup_values: List[str]) -> Optional[Dict]:
+        """Resolve an existing part using direct part lookup first, then supplier-part fallback."""
+        probe_values: List[str] = []
+        for value in lookup_values:
+            text = str(value or '').strip()
+            if text and text not in probe_values:
+                probe_values.append(text)
+
+        for probe in probe_values:
+            part_match = self._find_part_by_lookup(probe)
+            if part_match:
+                return part_match
+
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        token = getattr(api_obj, 'token', None) if api_obj else None
+        base_url = getattr(api_obj, 'base_url', '') if api_obj else ''
+        if not token or not base_url:
+            return None
+
+        try:
+            headers = {
+                'Authorization': f'Token {token}',
+                'Accept': 'application/json',
+            }
+            endpoint = f"{base_url.rstrip('/')}/api/company/part/"
+
+            for probe in probe_values:
+                response = self._request_with_retries(
+                    method='GET',
+                    url=endpoint,
+                    headers=headers,
+                    params={'search': probe, 'limit': 5},
+                    timeout=20,
+                )
+                if response is None:
+                    continue
+
+                payload = response.json()
+                if isinstance(payload, dict):
+                    rows = payload.get('results') or []
+                elif isinstance(payload, list):
+                    rows = payload
+                else:
+                    rows = []
+
+                for candidate in rows:
+                    part_ref = candidate.get('part')
+                    if isinstance(part_ref, dict):
+                        part_pk = part_ref.get('pk') or part_ref.get('id')
+                    else:
+                        part_pk = part_ref
+
+                    try:
+                        part_pk = int(part_pk)
+                    except Exception:
+                        continue
+
+                    return {'pk': part_pk}
+        except Exception:
+            return None
+
+        return None
+
+    def _resolve_location_string(self, part: Dict) -> str:
+        location_name = str(part.get('default_location_name') or '').strip()
+        if location_name:
+            return location_name
+
+        location_id = part.get('default_location')
+        if location_id in [None, '', 'None']:
+            return '-'
+
+        try:
+            location_id = int(location_id)
+        except (TypeError, ValueError):
+            return str(location_id)
+
+        try:
+            location_tree = inventree_interface.inventree_api.get_stock_location_tree(location_id)
+            names = [str(name) for name in reversed(list(location_tree.values())) if str(name).strip()]
+            if names:
+                return '/'.join(names)
+        except Exception:
+            pass
+
+        return str(location_id)
+
+    def _validate_import_row_async(self, row: BarcodeScannedRow):
+        """Assign-style live validation so Barcode list resolves existing parts before import."""
+        try:
+            row.status = 'Checking server...'
+            self._update_results_table()
+
+            if not self._connect_server_with_retries(attempts=3, delay_seconds=1.0):
+                row.status = 'Server offline'
+                self._update_results_table()
+                return
+
+            row.status = 'Checking part...'
+            self._update_results_table()
+
+            part = self._find_existing_part_for_row([
+                row.lookup_value,
+                row.manufacturer_pn,
+                row.supplier_pn,
+                row.raw_barcode,
+                row.barcode,
+            ])
+
+            if not part:
+                row.status = 'New part'
+                row.part_pk = None
+                row.part_name = ''
+                self._update_results_table()
+                return
+
+            row.part_pk = int(part.get('pk') or part.get('id') or 0)
+            row.part_name = str(part.get('name') or part.get('IPN') or row.search_name)
+            try:
+                row.default_location_pk = int(part.get('default_location') or 0)
+            except Exception:
+                row.default_location_pk = 0
+
+            if not row.location:
+                row.location = self._resolve_location_string(part)
+
+            # Fetch and set existing part category label without extra API calls.
+            part_category = ''
+            raw_category_name = part.get('category_name')
+            if raw_category_name not in [None, '']:
+                part_category = str(raw_category_name).strip()
+
+            if not part_category:
+                category_detail = part.get('category_detail')
+                if isinstance(category_detail, dict):
+                    part_category = str(category_detail.get('pathstring') or category_detail.get('name') or '').strip()
+
+            if not part_category:
+                raw_category = part.get('category')
+                if isinstance(raw_category, dict):
+                    part_category = str(raw_category.get('pathstring') or raw_category.get('name') or '').strip()
+
+            if part_category and not part_category.isdigit():
+                row.category = part_category
+            else:
+                row.category = ''
+
+            row.barcode_hash = str(part.get('barcode_hash') or '').strip()
+            row.has_barcode = bool(row.barcode_hash)
+
+            row.current_barcodes = self._fetch_part_barcodes(part_pk=row.part_pk)
+            if not row.current_barcodes and row.barcode_hash:
+                # Fallback for servers where barcode endpoint is unavailable.
+                if row.part_name:
+                    row.current_barcodes = [row.part_name]
+
+            has_location = bool(row.default_location_pk)
+            if has_location and row.has_barcode:
+                row.status = 'Existing (location+barcode)'
+            elif has_location:
+                row.status = 'Existing (missing barcode)'
+            elif row.has_barcode:
+                row.status = 'Existing (missing location)'
+            else:
+                row.status = 'Existing (missing location+barcode)'
+        except Exception as exc:
+            row.status = f'Error: {str(exc)[:40]}'
+        finally:
+            self._update_results_table()
     
     def _remove_row(self, idx: int):
         """Remove a scanned row."""
@@ -614,7 +940,8 @@ class BarcodeImportView(MainView):
         category = self.fields['category_select'].value
         if category:
             for row in self.scanned_rows:
-                row.category = category
+                if not int(getattr(row, 'part_pk', 0) or 0):
+                    row.category = category
             self._update_results_table()
     
     def _on_location_changed(self, *args, **kwargs):
@@ -629,7 +956,8 @@ class BarcodeImportView(MainView):
             except (ValueError, TypeError):
                 pass
             for row in self.scanned_rows:
-                row.location = location
+                if not int(getattr(row, 'part_pk', 0) or 0):
+                    row.location = location
             self._update_results_table()
     
     def _on_create_stock_changed(self, _):
@@ -638,6 +966,24 @@ class BarcodeImportView(MainView):
         for row in self.scanned_rows:
             row.create_stock = create_stock
         self._update_results_table()
+
+    def _clear_category_location(self, _):
+        """Clear global category/location selections and row overrides."""
+        self.fields['category_select'].value = None
+        self.fields['location_select'].value = None
+
+        for row in self.scanned_rows:
+            row.category = ''
+            row.location = ''
+
+        try:
+            self.fields['category_select'].update()
+            self.fields['location_select'].update()
+        except AssertionError:
+            pass
+
+        self._update_results_table()
+        self._show_status('Cleared category and location selections', color='blue')
     
     def _toggle_create_stock(self, idx: int):
         """Toggle create_stock for a specific row."""
@@ -690,6 +1036,276 @@ class BarcodeImportView(MainView):
                     )
                     time.sleep(delay_seconds)
         return False
+
+    def _request_with_retries(
+            self,
+            method: str,
+            url: str,
+            attempts: int = 3,
+            delay_seconds: float = 1.0,
+            **kwargs,
+    ) -> Optional[requests.Response]:
+        """Run HTTP request with retry on transient/network failures."""
+        for attempt in range(1, attempts + 1):
+            try:
+                response = self._http.request(method=method.upper(), url=url, **kwargs)
+                if response.status_code == 429 or response.status_code >= 500:
+                    raise requests.HTTPError(f'HTTP {response.status_code}', response=response)
+                response.raise_for_status()
+                return response
+            except requests.RequestException as exc:
+                status_code = None
+                try:
+                    status_code = int(getattr(getattr(exc, 'response', None), 'status_code', 0))
+                except Exception:
+                    status_code = None
+
+                if status_code and 400 <= status_code < 500 and status_code != 429:
+                    return None
+
+                if attempt < attempts:
+                    time.sleep(delay_seconds)
+                else:
+                    return None
+
+        return None
+
+    def _set_part_default_location(self, part_pk: int, location_pk: int) -> bool:
+        """Set part default location using direct API patch with retries."""
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if not api_obj:
+            return False
+
+        token = getattr(api_obj, 'token', None)
+        base_url = getattr(api_obj, 'base_url', '')
+        if not token or not base_url:
+            return False
+
+        endpoint = f"{base_url.rstrip('/')}/api/part/{int(part_pk)}/"
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+
+        response = self._request_with_retries(
+            method='PATCH',
+            url=endpoint,
+            headers=headers,
+            json={'default_location': int(location_pk)},
+            timeout=20,
+        )
+        return response is not None and response.status_code in [200, 202]
+
+    def _link_part_barcode(self, part_pk: int, barcode_value: str) -> bool:
+        """Link barcode to part using direct API call with retries."""
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if not api_obj:
+            return False
+
+        token = getattr(api_obj, 'token', None)
+        base_url = getattr(api_obj, 'base_url', '')
+        if not token or not base_url:
+            return False
+
+        endpoint = f"{base_url.rstrip('/')}/api/barcode/link/"
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+
+        payload = {
+            'barcode': str(barcode_value or '').strip(),
+            'part': int(part_pk),
+        }
+        if not payload['barcode']:
+            return False
+
+        response = self._request_with_retries(
+            method='POST',
+            url=endpoint,
+            headers=headers,
+            json=payload,
+            timeout=20,
+        )
+        return response is not None and response.status_code in [200, 201, 202]
+
+    def _fetch_part_barcodes(self, part_pk: int) -> List[str]:
+        """Fetch current external barcode values for a part via /api/barcode/."""
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if not api_obj:
+            return []
+
+        token = getattr(api_obj, 'token', None)
+        base_url = getattr(api_obj, 'base_url', '')
+        if not token or not base_url:
+            return []
+
+        endpoint = f"{base_url.rstrip('/')}/api/barcode/"
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+
+        if self._barcode_endpoint_available is None:
+            try:
+                probe_response = self._http.get(
+                    endpoint,
+                    headers=headers,
+                    params={'limit': 1},
+                    timeout=6,
+                )
+                self._barcode_endpoint_available = probe_response.status_code not in [404, 405]
+            except Exception:
+                self._barcode_endpoint_available = False
+
+        if not self._barcode_endpoint_available:
+            return []
+
+        try:
+            response = self._request_with_retries(
+                method='GET',
+                url=endpoint,
+                headers=headers,
+                params={'part': part_pk, 'limit': 100},
+                timeout=20,
+            )
+            if response is None:
+                return []
+
+            payload = response.json()
+            if isinstance(payload, dict):
+                rows = payload.get('results') or []
+            elif isinstance(payload, list):
+                rows = payload
+            else:
+                rows = []
+
+            values: List[str] = []
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                barcode_value = item.get('data') or item.get('barcode') or item.get('value')
+                if barcode_value:
+                    values.append(str(barcode_value))
+            return values
+        except Exception:
+            return []
+
+    def _collect_transfer_items_for_part(self, part_pk: int, location_pk: int) -> tuple[List[Dict], str]:
+        """Collect transferable stock-item payload rows for a part."""
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if not api_obj:
+            return [], 'Missing InvenTree API object'
+
+        token = getattr(api_obj, 'token', None)
+        base_url = getattr(api_obj, 'base_url', '')
+        if not token or not base_url:
+            return [], 'Missing InvenTree auth context'
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+
+        transfer_items: List[Dict] = []
+
+        try:
+            url = f"{base_url.rstrip('/')}/api/stock/"
+            params = {'part': part_pk, 'limit': 250}
+
+            while url:
+                response = self._request_with_retries(
+                    method='GET',
+                    url=url,
+                    headers=headers,
+                    params=params,
+                    timeout=20,
+                )
+                if response is None:
+                    return transfer_items, 'Failed to list stock items after retries'
+                payload = response.json()
+
+                if isinstance(payload, dict):
+                    rows = payload.get('results') or []
+                    next_url = payload.get('next')
+                elif isinstance(payload, list):
+                    rows = payload
+                    next_url = None
+                else:
+                    rows = []
+                    next_url = None
+
+                for item in rows:
+                    item_pk = item.get('pk') or item.get('id')
+                    if not item_pk:
+                        continue
+
+                    current_loc = item.get('location')
+                    try:
+                        if current_loc is not None and int(current_loc) == int(location_pk):
+                            continue
+                    except Exception:
+                        pass
+
+                    try:
+                        transfer_items.append(
+                            {
+                                'pk': int(item_pk),
+                                'quantity': str(item.get('quantity') or '0'),
+                                'batch': str(item.get('batch') or ''),
+                                'packaging': str(item.get('packaging') or ''),
+                                'status': int(item.get('status') or 0),
+                            }
+                        )
+                    except Exception:
+                        continue
+
+                url = next_url
+                params = {}
+
+            return transfer_items, ''
+        except Exception as exc:
+            return transfer_items, str(exc)
+
+    def _transfer_stock_items_bulk(self, transfer_items: List[Dict], location_pk: int) -> tuple[bool, str]:
+        """Transfer multiple stock items to one location in a single API call."""
+        if not transfer_items:
+            return True, ''
+
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if not api_obj:
+            return False, 'Missing InvenTree API object'
+
+        token = getattr(api_obj, 'token', None)
+        base_url = getattr(api_obj, 'base_url', '')
+        if not token or not base_url:
+            return False, 'Missing InvenTree auth context'
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+        transfer_endpoint = f"{base_url.rstrip('/')}/api/stock/transfer/"
+        transfer_payload = {
+            'items': transfer_items,
+            'location': int(location_pk),
+            'notes': 'Ki-nTree bulk location update',
+        }
+        transfer_response = self._request_with_retries(
+            method='POST',
+            url=transfer_endpoint,
+            headers=headers,
+            json=transfer_payload,
+            timeout=45,
+        )
+
+        if transfer_response is not None and transfer_response.status_code in [200, 201, 202]:
+            return True, ''
+
+        return False, 'Bulk stock transfer request failed'
     
     def _on_submit(self, _):
         """Submit scanned items for import."""
@@ -706,39 +1322,8 @@ class BarcodeImportView(MainView):
                 )
                 return
 
-            if not row.category:
-                self.show_dialog(DialogType.ERROR, 'Please select a category for all items')
-                return
-
-            if row.create_stock and not row.location:
-                self.show_dialog(DialogType.ERROR, 'Please select a location for stock items')
-                return
-
-        # Show confirmation dialog with summary
-        summary = f'Ready to import {len(self.scanned_rows)} items:\n\n'
-        for row in self.scanned_rows[:7]:
-            summary += f'  • {row.supplier.upper()}: {row.search_name} (qty {row.quantity})\n'
-        if len(self.scanned_rows) > 7:
-            summary += f'  ... and {len(self.scanned_rows) - 7} more\n'
-        summary += '\nProceed?'
-
-        def confirm_import(_):
-            self._page.dialog.open = False
-            self._page.update()
-            self._show_status('Import running...', color='blue')
-            self._execute_import()
-
-        dlg = ft.AlertDialog(
-            title=ft.Text('Confirm Import'),
-            content=ft.Text(summary),
-            actions=[
-                ft.TextButton('Cancel', on_click=lambda _: setattr(self._page.dialog, 'open', False) or self._page.update()),
-                ft.TextButton('Import', on_click=confirm_import),
-            ],
-        )
-        self._page.dialog = dlg
-        self._page.dialog.open = True
-        self._page.update()
+        self._show_status('Import running...', color='blue')
+        self._execute_import()
     
     def _execute_import(self):
         """Execute the import process."""
@@ -766,12 +1351,28 @@ class BarcodeImportView(MainView):
         failures = []
         rows_snapshot = list(self.scanned_rows)
         use_manufacturer_barcode = bool(self.fields['use_manufacturer_barcode_check'].value)
+        assign_all_stock_items_location = bool(self.fields.get('assign_all_stock_items_location_check').value)
+        force_barcode_reassign = bool(self.fields.get('force_barcode_reassign_check').value)
+
+        selected_location_value = str(self.fields.get('location_select').value or '').strip()
+        assign_location_existing = bool(selected_location_value)
+        selected_location_pk = 0
+        if assign_location_existing:
+            selected_location_pk = self._get_stock_location_pk(selected_location_value)
+            if selected_location_pk <= 0:
+                self.fields['import_progress_message'].value = 'Import failed: selected location could not be resolved'
+                self.fields['import_progress_message'].color = 'red'
+                self.fields['import_progress_message'].update()
+                self.show_dialog(DialogType.ERROR, f'Selected stock location not found: {selected_location_value}')
+                return
+
         location_map: Dict[str, int] = {}
         location_map_lock = threading.Lock()
         location_map_loaded = False
+        row_results: List[Dict] = []
 
         def _process_import_row(idx: int, row: BarcodeScannedRow) -> Dict:
-            row_start_ts = time.perf_counter()
+            nonlocal location_map_loaded
             item_label = f'{row.supplier.upper()} - {row.search_name}'
             result = {
                 'idx': idx,
@@ -779,23 +1380,82 @@ class BarcodeImportView(MainView):
                 'ok': False,
                 'failure': '',
                 'part_pk': 0,
+                'existing_part': False,
             }
 
             try:
+                existing_part = self._find_existing_part_for_row([
+                    row.search_name,
+                    row.manufacturer_pn,
+                    row.supplier_pn,
+                    row.raw_barcode,
+                    row.barcode,
+                ])
+
+                if existing_part:
+                    part_pk = int(existing_part.get('pk') or existing_part.get('id') or 0)
+                    if not part_pk:
+                        result['failure'] = f'{row.search_name}: Existing part has invalid PK'
+                        return result
+
+                    part_name = str(existing_part.get('name') or existing_part.get('IPN') or row.search_name or '').strip()
+
+                    # Existing-part path: Assign workflow semantics.
+                    if assign_location_existing:
+                        set_ok = self._set_part_default_location(part_pk=part_pk, location_pk=selected_location_pk)
+                        if not set_ok:
+                            result['failure'] = f'{row.search_name}: default location update failed'
+                            return result
+
+                    if part_name:
+                        current_barcodes = self._fetch_part_barcodes(part_pk=part_pk)
+                        current_barcodes_normalized = {
+                            str(value or '').strip().lower()
+                            for value in current_barcodes
+                            if str(value or '').strip()
+                        }
+                        if part_name.lower() in current_barcodes_normalized:
+                            pass
+                        elif current_barcodes and not force_barcode_reassign:
+                            pass
+                        else:
+                            barcode_ok = False
+                            for attempt in range(1, 4):
+                                try:
+                                    barcode_ok = self._link_part_barcode(part_pk=part_pk, barcode_value=part_name)
+                                    if barcode_ok:
+                                        break
+                                    elif attempt < 3:
+                                        time.sleep(0.5)
+                                except Exception as exc:
+                                    cprint(f'[WARN]\tBarcode link retry {attempt} failed for "{row.search_name}": {str(exc)[:60]}', silent=False)
+                                    if attempt < 3:
+                                        time.sleep(0.5)
+                            if not barcode_ok:
+                                cprint(f'[WARN]\tBarcode reassignment failed for existing part {row.search_name} after retries', silent=False)
+
+                    result['ok'] = True
+                    result['part_pk'] = int(part_pk)
+                    result['existing_part'] = True
+                    return result
+
                 supplier_name = self._resolve_supplier_key(row.supplier)
-                ts_supplier = time.perf_counter()
-                supplier_data = inventree_interface.supplier_search(
-                    supplier=supplier_name,
-                    part_number=row.search_name,
-                )
-                elapsed_supplier = (time.perf_counter() - ts_supplier) * 1000.0
-                cprint(f'[BARCODE]\t  Row {idx}: supplier_search ({elapsed_supplier:.1f} ms)', silent=False)
+                supplier_data = None
+                if str(row.supplier or '').strip().lower() != 'unknown':
+                    supplier_data = inventree_interface.supplier_search(
+                        supplier=supplier_name,
+                        part_number=row.search_name,
+                    )
+                else:
+                    row.status = 'Skipped (unknown supplier)'
+                    result['failure'] = f'{row.search_name}: skipped new part creation (unknown supplier)'
+                    return result
 
                 if not supplier_data:
                     part_form = {
                         'name': row.search_name,
                         'description': f'Imported from {row.supplier.upper()}',
-                        'category_tree': [row.category],
+                        'category_tree': [row.category] if row.category else [],
                     }
                 else:
                     part_form = inventree_interface.translate_supplier_to_form(
@@ -803,36 +1463,35 @@ class BarcodeImportView(MainView):
                         part_info=supplier_data,
                     )
                     part_form['name'] = row.search_name
+
+                if row.category:
                     part_form['category_tree'] = [row.category]
+                else:
+                    part_form.pop('category_tree', None)
 
                 stock_payload = None
                 if row.create_stock:
-                    nonlocal location_map_loaded
-                    normalized_location = self._normalize_stock_location_value(row.location)
-                    with location_map_lock:
-                        if not location_map_loaded:
-                            ts_map = time.perf_counter()
-                            location_map.update(inventree_interface.get_stock_location_id_map() or {})
-                            location_map_loaded = True
-                            elapsed_map = (time.perf_counter() - ts_map) * 1000.0
-                            cprint(f'[BARCODE]\t  Row {idx}: location_map_load ({elapsed_map:.1f} ms)', silent=False)
+                    if not row.location:
+                        pass
+                    else:
+                        normalized_location = self._normalize_stock_location_value(row.location)
+                        with location_map_lock:
+                            if not location_map_loaded:
+                                location_map.update(inventree_interface.get_stock_location_id_map() or {})
+                                location_map_loaded = True
 
-                    ts_loc = time.perf_counter()
-                    location_pk = inventree_interface.resolve_stock_location_pk(normalized_location, location_map)
-                    elapsed_loc = (time.perf_counter() - ts_loc) * 1000.0
-                    cprint(f'[BARCODE]\t  Row {idx}: location_resolve ({elapsed_loc:.1f} ms)', silent=False)
+                        location_pk = inventree_interface.resolve_stock_location_pk(normalized_location, location_map)
 
-                    if location_pk <= 0:
-                        result['failure'] = f'{row.search_name}: Location not found'
-                        return result
+                        if location_pk <= 0:
+                            result['failure'] = f'{row.search_name}: Location not found'
+                            return result
 
-                    stock_payload = {
-                        'location': location_pk,
-                        'quantity': row.quantity or 1,
-                        'make_default': False,
-                    }
+                        stock_payload = {
+                            'location': location_pk,
+                            'quantity': row.quantity or 1,
+                            'make_default': False,
+                        }
 
-                ts_create = time.perf_counter()
                 new_part, part_pk, _ = inventree_interface.inventree_create(
                     part_info=part_form,
                     kicad=False,
@@ -840,8 +1499,6 @@ class BarcodeImportView(MainView):
                     is_custom=False,
                     stock=None,
                 )
-                elapsed_create = (time.perf_counter() - ts_create) * 1000.0
-                cprint(f'[BARCODE]\t  Row {idx}: inventree_create ({elapsed_create:.1f} ms)', silent=False)
 
                 if not part_pk:
                     result['failure'] = f'{row.search_name}: Failed to create'
@@ -850,10 +1507,7 @@ class BarcodeImportView(MainView):
                 if stock_payload is not None:
                     stock_data = dict(stock_payload)
                     stock_data['part'] = part_pk
-                    ts_stock = time.perf_counter()
                     stock_result = inventree_interface.inventree_api.create_stock(stock_data)
-                    elapsed_stock = (time.perf_counter() - ts_stock) * 1000.0
-                    cprint(f'[BARCODE]\t  Row {idx}: create_stock ({elapsed_stock:.1f} ms)', silent=False)
                     if not stock_result:
                         result['failure'] = f'{row.search_name}: Failed to create stock'
                         return result
@@ -861,27 +1515,20 @@ class BarcodeImportView(MainView):
                 barcode_value = row.barcode if use_manufacturer_barcode else ''
                 if barcode_value:
                     try:
-                        ts_barcode = time.perf_counter()
                         inventree_interface.inventree_api.link_barcode(barcode_value, part_pk=part_pk)
-                        elapsed_barcode = (time.perf_counter() - ts_barcode) * 1000.0
-                        cprint(f'[BARCODE]\t  Row {idx}: link_barcode ({elapsed_barcode:.1f} ms)', silent=False)
                     except Exception as exc:
                         cprint(f'[WARN]\tBarcode linking failed for {row.search_name}: {str(exc)}', silent=False)
 
                 result['ok'] = True
                 result['part_pk'] = int(part_pk)
-                cprint(f'[BARCODE]\tImported {item_label} (part_pk={part_pk})', silent=False)
                 return result
             except Exception as exc:
                 result['failure'] = f'{row.search_name}: {str(exc)[:50]}'
-                cprint(f'[BARCODE]\tException importing {item_label}: {str(exc)[:120]}', silent=False)
+                cprint(f'[WARN]\tImport exception for {item_label}: {str(exc)[:120]}', silent=False)
                 return result
-            finally:
-                elapsed_row = (time.perf_counter() - row_start_ts) * 1000.0
-                cprint(f'[BARCODE]\tRow {idx} total: {elapsed_row:.1f} ms', silent=False)
 
         max_workers = min(4, max(1, total))
-        cprint(f'[BARCODE]\tParallel row workers: {max_workers}', silent=False)
+        cprint(f'[BARCODE]\tParallel workers: {max_workers}', silent=False)
 
         completed = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -892,18 +1539,59 @@ class BarcodeImportView(MainView):
 
             for future in as_completed(future_map):
                 result = future.result()
-                if result['ok']:
-                    success += 1
-                else:
-                    failed += 1
-                    if result['failure']:
-                        failures.append(result['failure'])
+                row_results.append(result)
 
                 completed += 1
                 self.fields['import_progress'].value = completed / total if total else 1.0
                 self.fields['import_progress'].update()
                 self.fields['import_progress_message'].value = f'Processed {completed}/{total}'
                 self.fields['import_progress_message'].update()
+
+        if assign_all_stock_items_location and selected_location_pk > 0:
+            existing_success_rows = [
+                item for item in row_results
+                if item.get('ok') and item.get('existing_part') and int(item.get('part_pk') or 0) > 0
+            ]
+            part_to_rows: Dict[int, List[Dict]] = {}
+            for item in existing_success_rows:
+                part_to_rows.setdefault(int(item['part_pk']), []).append(item)
+
+            all_transfer_items: List[Dict] = []
+            collect_errors: List[str] = []
+
+            for part_pk in sorted(part_to_rows.keys()):
+                transfer_items, part_error = self._collect_transfer_items_for_part(
+                    part_pk=part_pk,
+                    location_pk=selected_location_pk,
+                )
+                if part_error:
+                    collect_errors.append(f'part_pk={part_pk}: {part_error}')
+                if transfer_items:
+                    all_transfer_items.extend(transfer_items)
+
+            bulk_ok, bulk_error = self._transfer_stock_items_bulk(
+                transfer_items=all_transfer_items,
+                location_pk=selected_location_pk,
+            )
+            if bulk_ok:
+                cprint(f'[BARCODE]\tStock items updated (items={len(all_transfer_items)}, parts={len(part_to_rows)})', silent=False)
+            else:
+                cprint('[BARCODE]\tCombined stock transfer failed for existing parts', silent=False)
+                detail = bulk_error or 'Bulk stock transfer request failed'
+                for item in existing_success_rows:
+                    item['ok'] = False
+                    item['failure'] = f"{item['row'].search_name}: stock location assignment failed ({detail})"
+
+            for warning in collect_errors[:5]:
+                cprint(f'[BARCODE]\tStock collect warning: {warning}', silent=False)
+
+        for result in sorted(row_results, key=lambda item: item.get('idx', 0)):
+            if result.get('ok'):
+                success += 1
+            else:
+                failed += 1
+                if result.get('failure'):
+                    failures.append(result['failure'])
         
         # Show summary
         summary = f'Import complete:\n  ✓ Success: {success}\n  ✗ Failed: {failed}'
@@ -932,7 +1620,7 @@ class BarcodeImportView(MainView):
         elapsed_total = (time.perf_counter() - op_start_ts) * 1000.0
         cprint(f'[BARCODE]\tTotal operation time: {elapsed_total:.1f} ms ({total} rows)', silent=False)
         if total:
-            cprint(f'[BARCODE]\tPer-row average: {elapsed_total/total:.1f} ms', silent=False)
+            cprint(f'[BARCODE]\tAverage per row: {elapsed_total/total:.1f} ms', silent=False)
 
         cprint(f'[BARCODE]\tImport finished: success={success} failed={failed}', silent=False)
         

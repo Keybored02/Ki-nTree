@@ -10,7 +10,7 @@ from .views.main import (
     KicadView,
     CreateView,
 )
-from .views.barcode import BarcodeImportView, BarcodeAssignmentView
+from .views.barcode import BarcodeImportView
 from .views.settings import (
     UserSettingsView,
     SupplierSettingsView,
@@ -72,7 +72,6 @@ def kintree_gui(page: ft.Page):
         'kicad': None,
         'create': None,
         'barcode': None,
-        'assign': None,
     }
     settings_views = {
         'user': None,
@@ -92,8 +91,6 @@ def kintree_gui(page: ft.Page):
             main_views['create'] = CreateView(page)
         elif key == 'barcode' and main_views['barcode'] is None:
             main_views['barcode'] = BarcodeImportView(page)
-        elif key == 'assign' and main_views['assign'] is None:
-            main_views['assign'] = BarcodeAssignmentView(page)
         return main_views[key]
 
     def get_settings_view(key: str):
@@ -110,6 +107,9 @@ def kintree_gui(page: ft.Page):
     # Routing
     def route_change(route):
         current_route = page.route or '/'
+        if '/main/assign' in current_route:
+            page.go('/main/barcode')
+            return
         # print(f'\n--> Routing to {route.route}')
         if '/main' in current_route or current_route == '/':
             page.views.clear()
@@ -121,8 +121,6 @@ def kintree_gui(page: ft.Page):
                 page.views.append(get_main_view('kicad'))
             elif 'create' in current_route:
                 page.views.append(get_main_view('create'))
-            elif 'assign' in current_route:
-                page.views.append(get_main_view('assign'))
             elif 'barcode' in current_route:
                 page.views.append(get_main_view('barcode'))
         elif '/settings' in current_route:
@@ -142,8 +140,6 @@ def kintree_gui(page: ft.Page):
         _stabilize_layout(page)
         if '/main/barcode' in current_route:
             main_views['barcode'].focus_barcode_input()
-        if '/main/assign' in current_route:
-            main_views['assign'].focus_input()
 
     def view_pop(view):
         '''Pop setting view'''
