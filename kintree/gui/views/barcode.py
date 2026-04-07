@@ -105,6 +105,401 @@ class ExistingPartScanRow:
         self.barcode_hash = ''
 
 
+class _BarcodeApiHelpers:
+    """Shared API helper methods used by Barcode and Assign workflows."""
+
+    @staticmethod
+    def normalize_stock_location_value(location: str) -> str:
+        return '/'.join(
+            part.strip()
+            for part in re.sub(r'^-+\s+', '', str(location or '').strip()).split('/')
+            if part.strip()
+        )
+
+    @staticmethod
+    def find_part_by_lookup(ctx, lookup_value: str) -> Optional[Dict]:
+        cache_key = str(lookup_value or '').strip().lower()
+        if not cache_key:
+            return None
+
+        with ctx._part_lookup_lock:
+            if cache_key in ctx._part_lookup_cache:
+                return ctx._part_lookup_cache[cache_key]
+
+            wait_event = ctx._part_lookup_inflight.get(cache_key)
+            is_leader = wait_event is None
+            if is_leader:
+                wait_event = threading.Event()
+                ctx._part_lookup_inflight[cache_key] = wait_event
+
+        if not is_leader:
+            wait_event.wait(timeout=20.0)
+            with ctx._part_lookup_lock:
+                return ctx._part_lookup_cache.get(cache_key)
+
+        result = None
+        try:
+            api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+            if not api_obj:
+                result = None
+            else:
+                token = getattr(api_obj, 'token', None)
+                base_url = getattr(api_obj, 'base_url', '')
+                if not token or not base_url:
+                    result = None
+                else:
+                    endpoint = f"{base_url.rstrip('/')}/api/part/"
+                    headers = {
+                        'Authorization': f'Token {token}',
+                        'Accept': 'application/json',
+                    }
+                    response = ctx._request_with_retries(
+                        method='GET',
+                        url=endpoint,
+                        headers=headers,
+                        params={'search': lookup_value, 'limit': 5},
+                        timeout=20,
+                    )
+                    if response is not None:
+                        payload = response.json()
+
+                        if isinstance(payload, dict):
+                            rows = payload.get('results') or []
+                        elif isinstance(payload, list):
+                            rows = payload
+                        else:
+                            rows = []
+
+                        if rows:
+                            needle = lookup_value.strip().lower()
+                            for candidate in rows:
+                                ipn = str(candidate.get('IPN') or '').strip().lower()
+                                name = str(candidate.get('name') or '').strip().lower()
+                                if needle and (needle == ipn or needle == name):
+                                    result = candidate
+                                    break
+
+                            if result is None:
+                                result = rows[0]
+        except Exception:
+            result = None
+        finally:
+            with ctx._part_lookup_lock:
+                ctx._part_lookup_cache[cache_key] = result
+                inflight_event = ctx._part_lookup_inflight.pop(cache_key, None)
+                if inflight_event is not None:
+                    inflight_event.set()
+
+        return result
+
+    @staticmethod
+    def resolve_location_string(part: Dict) -> str:
+        location_name = str(part.get('default_location_name') or '').strip()
+        if location_name:
+            return location_name
+
+        location_id = part.get('default_location')
+        if location_id in [None, '', 'None']:
+            return '-'
+
+        try:
+            location_id = int(location_id)
+        except (TypeError, ValueError):
+            return str(location_id)
+
+        try:
+            location_tree = inventree_interface.inventree_api.get_stock_location_tree(location_id)
+            names = [str(name) for name in reversed(list(location_tree.values())) if str(name).strip()]
+            if names:
+                return '/'.join(names)
+        except Exception:
+            pass
+
+        return str(location_id)
+
+    @staticmethod
+    def fetch_part_barcodes(ctx, part_pk: int) -> List[str]:
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if not api_obj:
+            return []
+
+        token = getattr(api_obj, 'token', None)
+        base_url = getattr(api_obj, 'base_url', '')
+        if not token or not base_url:
+            return []
+
+        endpoint = f"{base_url.rstrip('/')}/api/barcode/"
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+
+        if getattr(ctx, '_barcode_endpoint_available', None) is None:
+            try:
+                probe_response = ctx._http.get(
+                    endpoint,
+                    headers=headers,
+                    params={'limit': 1},
+                    timeout=6,
+                )
+                ctx._barcode_endpoint_available = probe_response.status_code not in [404, 405]
+            except Exception:
+                ctx._barcode_endpoint_available = False
+
+        if not ctx._barcode_endpoint_available:
+            return []
+
+        def _extract_values(payload) -> List[str]:
+            if isinstance(payload, dict):
+                rows = payload.get('results') or []
+            elif isinstance(payload, list):
+                rows = payload
+            else:
+                rows = []
+
+            values: List[str] = []
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                barcode_value = item.get('data') or item.get('barcode') or item.get('value')
+                if barcode_value:
+                    values.append(str(barcode_value))
+            return values
+
+        try:
+            response = ctx._request_with_retries(
+                method='GET',
+                url=endpoint,
+                headers=headers,
+                params={'part': part_pk, 'limit': 100},
+                timeout=20,
+            )
+            if response is None:
+                return []
+            values = _extract_values(response.json())
+            if values:
+                return values
+        except Exception:
+            pass
+
+        try:
+            response = ctx._request_with_retries(
+                method='GET',
+                url=endpoint,
+                headers=headers,
+                params={'limit': 200},
+                timeout=20,
+            )
+            if response is None:
+                return []
+            payload = response.json()
+            if isinstance(payload, dict):
+                rows = payload.get('results') or []
+            elif isinstance(payload, list):
+                rows = payload
+            else:
+                rows = []
+
+            values: List[str] = []
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                part_ref = item.get('part')
+                item_part_pk = None
+                if isinstance(part_ref, dict):
+                    item_part_pk = part_ref.get('pk') or part_ref.get('id')
+                else:
+                    item_part_pk = part_ref
+
+                try:
+                    if int(item_part_pk) != int(part_pk):
+                        continue
+                except Exception:
+                    continue
+
+                barcode_value = item.get('data') or item.get('barcode') or item.get('value')
+                if barcode_value:
+                    values.append(str(barcode_value))
+            return values
+        except Exception:
+            return []
+
+    @staticmethod
+    def set_part_default_location(ctx, part_pk: int, location_pk: int) -> bool:
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if not api_obj:
+            return False
+
+        token = getattr(api_obj, 'token', None)
+        base_url = getattr(api_obj, 'base_url', '')
+        if not token or not base_url:
+            return False
+
+        endpoint = f"{base_url.rstrip('/')}/api/part/{int(part_pk)}/"
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+
+        response = ctx._request_with_retries(
+            method='PATCH',
+            url=endpoint,
+            headers=headers,
+            json={'default_location': int(location_pk)},
+            timeout=20,
+        )
+        return response is not None and response.status_code in [200, 202]
+
+    @staticmethod
+    def link_part_barcode(ctx, part_pk: int, barcode_value: str) -> bool:
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if not api_obj:
+            return False
+
+        token = getattr(api_obj, 'token', None)
+        base_url = getattr(api_obj, 'base_url', '')
+        if not token or not base_url:
+            return False
+
+        endpoint = f"{base_url.rstrip('/')}/api/barcode/link/"
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+
+        payload = {
+            'barcode': str(barcode_value or '').strip(),
+            'part': int(part_pk),
+        }
+        if not payload['barcode']:
+            return False
+
+        response = ctx._request_with_retries(
+            method='POST',
+            url=endpoint,
+            headers=headers,
+            json=payload,
+            timeout=20,
+        )
+        return response is not None and response.status_code in [200, 201, 202]
+
+    @staticmethod
+    def collect_transfer_items_for_part(ctx, part_pk: int, location_pk: int) -> tuple[List[Dict], str]:
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if not api_obj:
+            return [], 'Missing InvenTree API object'
+
+        token = getattr(api_obj, 'token', None)
+        base_url = getattr(api_obj, 'base_url', '')
+        if not token or not base_url:
+            return [], 'Missing InvenTree auth context'
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+
+        transfer_items: List[Dict] = []
+
+        try:
+            url = f"{base_url.rstrip('/')}/api/stock/"
+            params = {'part': part_pk, 'limit': 250}
+
+            while url:
+                response = ctx._request_with_retries(
+                    method='GET',
+                    url=url,
+                    headers=headers,
+                    params=params,
+                    timeout=20,
+                )
+                if response is None:
+                    return transfer_items, 'Failed to list stock items after retries'
+                payload = response.json()
+
+                if isinstance(payload, dict):
+                    rows = payload.get('results') or []
+                    next_url = payload.get('next')
+                elif isinstance(payload, list):
+                    rows = payload
+                    next_url = None
+                else:
+                    rows = []
+                    next_url = None
+
+                for item in rows:
+                    item_pk = item.get('pk') or item.get('id')
+                    if not item_pk:
+                        continue
+
+                    current_loc = item.get('location')
+                    try:
+                        if current_loc is not None and int(current_loc) == int(location_pk):
+                            continue
+                    except Exception:
+                        pass
+
+                    try:
+                        transfer_items.append(
+                            {
+                                'pk': int(item_pk),
+                                'quantity': str(item.get('quantity') or '0'),
+                                'batch': str(item.get('batch') or ''),
+                                'packaging': str(item.get('packaging') or ''),
+                                'status': int(item.get('status') or 0),
+                            }
+                        )
+                    except Exception:
+                        continue
+
+                url = next_url
+                params = {}
+
+            return transfer_items, ''
+        except Exception as exc:
+            return transfer_items, str(exc)
+
+    @staticmethod
+    def transfer_stock_items_bulk(ctx, transfer_items: List[Dict], location_pk: int) -> tuple[bool, str]:
+        if not transfer_items:
+            return True, ''
+
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        if not api_obj:
+            return False, 'Missing InvenTree API object'
+
+        token = getattr(api_obj, 'token', None)
+        base_url = getattr(api_obj, 'base_url', '')
+        if not token or not base_url:
+            return False, 'Missing InvenTree auth context'
+
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+        transfer_endpoint = f"{base_url.rstrip('/')}/api/stock/transfer/"
+        transfer_payload = {
+            'items': transfer_items,
+            'location': int(location_pk),
+            'notes': 'Ki-nTree bulk location update',
+        }
+        transfer_response = ctx._request_with_retries(
+            method='POST',
+            url=transfer_endpoint,
+            headers=headers,
+            json=transfer_payload,
+            timeout=45,
+        )
+
+        if transfer_response is not None and transfer_response.status_code in [200, 201, 202]:
+            return True, ''
+
+        return False, 'Bulk stock transfer request failed'
+
+
 class BarcodeImportView(MainView):
     """Barcode scanner and import view for Ki-nTree.
 
@@ -677,78 +1072,7 @@ class BarcodeImportView(MainView):
         return text[:max_len - 3] + '...'
 
     def _find_part_by_lookup(self, lookup_value: str) -> Optional[Dict]:
-        cache_key = str(lookup_value or '').strip().lower()
-        if not cache_key:
-            return None
-
-        with self._part_lookup_lock:
-            if cache_key in self._part_lookup_cache:
-                return self._part_lookup_cache[cache_key]
-
-            wait_event = self._part_lookup_inflight.get(cache_key)
-            is_leader = wait_event is None
-            if is_leader:
-                wait_event = threading.Event()
-                self._part_lookup_inflight[cache_key] = wait_event
-
-        if not is_leader:
-            wait_event.wait(timeout=20.0)
-            with self._part_lookup_lock:
-                return self._part_lookup_cache.get(cache_key)
-
-        result = None
-        try:
-            api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
-            if not api_obj:
-                result = None
-            else:
-                token = getattr(api_obj, 'token', None)
-                base_url = getattr(api_obj, 'base_url', '')
-                if not token or not base_url:
-                    result = None
-                else:
-                    endpoint = f"{base_url.rstrip('/')}/api/part/"
-                    headers = {
-                        'Authorization': f'Token {token}',
-                        'Accept': 'application/json',
-                    }
-                    response = self._request_with_retries(
-                        method='GET',
-                        url=endpoint,
-                        headers=headers,
-                        params={'search': lookup_value, 'limit': 5},
-                        timeout=20,
-                    )
-                    if response is not None:
-                        payload = response.json()
-
-                        if isinstance(payload, dict):
-                            rows = payload.get('results') or []
-                        elif isinstance(payload, list):
-                            rows = payload
-                        else:
-                            rows = []
-
-                        if rows:
-                            needle = lookup_value.strip().lower()
-                            for candidate in rows:
-                                ipn = str(candidate.get('IPN') or '').strip().lower()
-                                name = str(candidate.get('name') or '').strip().lower()
-                                if needle and (needle == ipn or needle == name):
-                                    result = candidate
-                                    break
-                            if result is None:
-                                result = rows[0]
-        except Exception:
-            result = None
-        finally:
-            with self._part_lookup_lock:
-                self._part_lookup_cache[cache_key] = result
-                inflight_event = self._part_lookup_inflight.pop(cache_key, None)
-                if inflight_event is not None:
-                    inflight_event.set()
-
-        return result
+        return _BarcodeApiHelpers.find_part_by_lookup(self, lookup_value)
 
     def _find_existing_part_for_row(self, lookup_values: List[str]) -> Optional[Dict]:
         """Resolve an existing part using direct part lookup first, then supplier-part fallback."""
@@ -814,28 +1138,7 @@ class BarcodeImportView(MainView):
         return None
 
     def _resolve_location_string(self, part: Dict) -> str:
-        location_name = str(part.get('default_location_name') or '').strip()
-        if location_name:
-            return location_name
-
-        location_id = part.get('default_location')
-        if location_id in [None, '', 'None']:
-            return '-'
-
-        try:
-            location_id = int(location_id)
-        except (TypeError, ValueError):
-            return str(location_id)
-
-        try:
-            location_tree = inventree_interface.inventree_api.get_stock_location_tree(location_id)
-            names = [str(name) for name in reversed(list(location_tree.values())) if str(name).strip()]
-            if names:
-                return '/'.join(names)
-        except Exception:
-            pass
-
-        return str(location_id)
+        return _BarcodeApiHelpers.resolve_location_string(part)
 
     def _validate_import_row_async(self, row: BarcodeScannedRow):
         """Assign-style live validation so Barcode list resolves existing parts before import."""
@@ -1001,11 +1304,7 @@ class BarcodeImportView(MainView):
             pass
 
     def _normalize_stock_location_value(self, location: str) -> str:
-        return '/'.join(
-            part.strip()
-            for part in re.sub(r'^-+\s+', '', str(location or '').strip()).split('/')
-            if part.strip()
-        )
+        return _BarcodeApiHelpers.normalize_stock_location_value(location)
 
     def _get_stock_location_pk(self, location: str) -> int:
         location_pk = inventree_interface.resolve_stock_location_pk(location, self.stock_location_id_map)
@@ -1071,241 +1370,19 @@ class BarcodeImportView(MainView):
         return None
 
     def _set_part_default_location(self, part_pk: int, location_pk: int) -> bool:
-        """Set part default location using direct API patch with retries."""
-        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
-        if not api_obj:
-            return False
-
-        token = getattr(api_obj, 'token', None)
-        base_url = getattr(api_obj, 'base_url', '')
-        if not token or not base_url:
-            return False
-
-        endpoint = f"{base_url.rstrip('/')}/api/part/{int(part_pk)}/"
-        headers = {
-            'Authorization': f'Token {token}',
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-        }
-
-        response = self._request_with_retries(
-            method='PATCH',
-            url=endpoint,
-            headers=headers,
-            json={'default_location': int(location_pk)},
-            timeout=20,
-        )
-        return response is not None and response.status_code in [200, 202]
+        return _BarcodeApiHelpers.set_part_default_location(self, part_pk, location_pk)
 
     def _link_part_barcode(self, part_pk: int, barcode_value: str) -> bool:
-        """Link barcode to part using direct API call with retries."""
-        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
-        if not api_obj:
-            return False
-
-        token = getattr(api_obj, 'token', None)
-        base_url = getattr(api_obj, 'base_url', '')
-        if not token or not base_url:
-            return False
-
-        endpoint = f"{base_url.rstrip('/')}/api/barcode/link/"
-        headers = {
-            'Authorization': f'Token {token}',
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-        }
-
-        payload = {
-            'barcode': str(barcode_value or '').strip(),
-            'part': int(part_pk),
-        }
-        if not payload['barcode']:
-            return False
-
-        response = self._request_with_retries(
-            method='POST',
-            url=endpoint,
-            headers=headers,
-            json=payload,
-            timeout=20,
-        )
-        return response is not None and response.status_code in [200, 201, 202]
+        return _BarcodeApiHelpers.link_part_barcode(self, part_pk, barcode_value)
 
     def _fetch_part_barcodes(self, part_pk: int) -> List[str]:
-        """Fetch current external barcode values for a part via /api/barcode/."""
-        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
-        if not api_obj:
-            return []
-
-        token = getattr(api_obj, 'token', None)
-        base_url = getattr(api_obj, 'base_url', '')
-        if not token or not base_url:
-            return []
-
-        endpoint = f"{base_url.rstrip('/')}/api/barcode/"
-        headers = {
-            'Authorization': f'Token {token}',
-            'Accept': 'application/json',
-        }
-
-        if self._barcode_endpoint_available is None:
-            try:
-                probe_response = self._http.get(
-                    endpoint,
-                    headers=headers,
-                    params={'limit': 1},
-                    timeout=6,
-                )
-                self._barcode_endpoint_available = probe_response.status_code not in [404, 405]
-            except Exception:
-                self._barcode_endpoint_available = False
-
-        if not self._barcode_endpoint_available:
-            return []
-
-        try:
-            response = self._request_with_retries(
-                method='GET',
-                url=endpoint,
-                headers=headers,
-                params={'part': part_pk, 'limit': 100},
-                timeout=20,
-            )
-            if response is None:
-                return []
-
-            payload = response.json()
-            if isinstance(payload, dict):
-                rows = payload.get('results') or []
-            elif isinstance(payload, list):
-                rows = payload
-            else:
-                rows = []
-
-            values: List[str] = []
-            for item in rows:
-                if not isinstance(item, dict):
-                    continue
-                barcode_value = item.get('data') or item.get('barcode') or item.get('value')
-                if barcode_value:
-                    values.append(str(barcode_value))
-            return values
-        except Exception:
-            return []
+        return _BarcodeApiHelpers.fetch_part_barcodes(self, part_pk)
 
     def _collect_transfer_items_for_part(self, part_pk: int, location_pk: int) -> tuple[List[Dict], str]:
-        """Collect transferable stock-item payload rows for a part."""
-        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
-        if not api_obj:
-            return [], 'Missing InvenTree API object'
-
-        token = getattr(api_obj, 'token', None)
-        base_url = getattr(api_obj, 'base_url', '')
-        if not token or not base_url:
-            return [], 'Missing InvenTree auth context'
-
-        headers = {
-            'Authorization': f'Token {token}',
-            'Accept': 'application/json',
-        }
-
-        transfer_items: List[Dict] = []
-
-        try:
-            url = f"{base_url.rstrip('/')}/api/stock/"
-            params = {'part': part_pk, 'limit': 250}
-
-            while url:
-                response = self._request_with_retries(
-                    method='GET',
-                    url=url,
-                    headers=headers,
-                    params=params,
-                    timeout=20,
-                )
-                if response is None:
-                    return transfer_items, 'Failed to list stock items after retries'
-                payload = response.json()
-
-                if isinstance(payload, dict):
-                    rows = payload.get('results') or []
-                    next_url = payload.get('next')
-                elif isinstance(payload, list):
-                    rows = payload
-                    next_url = None
-                else:
-                    rows = []
-                    next_url = None
-
-                for item in rows:
-                    item_pk = item.get('pk') or item.get('id')
-                    if not item_pk:
-                        continue
-
-                    current_loc = item.get('location')
-                    try:
-                        if current_loc is not None and int(current_loc) == int(location_pk):
-                            continue
-                    except Exception:
-                        pass
-
-                    try:
-                        transfer_items.append(
-                            {
-                                'pk': int(item_pk),
-                                'quantity': str(item.get('quantity') or '0'),
-                                'batch': str(item.get('batch') or ''),
-                                'packaging': str(item.get('packaging') or ''),
-                                'status': int(item.get('status') or 0),
-                            }
-                        )
-                    except Exception:
-                        continue
-
-                url = next_url
-                params = {}
-
-            return transfer_items, ''
-        except Exception as exc:
-            return transfer_items, str(exc)
+        return _BarcodeApiHelpers.collect_transfer_items_for_part(self, part_pk, location_pk)
 
     def _transfer_stock_items_bulk(self, transfer_items: List[Dict], location_pk: int) -> tuple[bool, str]:
-        """Transfer multiple stock items to one location in a single API call."""
-        if not transfer_items:
-            return True, ''
-
-        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
-        if not api_obj:
-            return False, 'Missing InvenTree API object'
-
-        token = getattr(api_obj, 'token', None)
-        base_url = getattr(api_obj, 'base_url', '')
-        if not token or not base_url:
-            return False, 'Missing InvenTree auth context'
-
-        headers = {
-            'Authorization': f'Token {token}',
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-        }
-        transfer_endpoint = f"{base_url.rstrip('/')}/api/stock/transfer/"
-        transfer_payload = {
-            'items': transfer_items,
-            'location': int(location_pk),
-            'notes': 'Ki-nTree bulk location update',
-        }
-        transfer_response = self._request_with_retries(
-            method='POST',
-            url=transfer_endpoint,
-            headers=headers,
-            json=transfer_payload,
-            timeout=45,
-        )
-
-        if transfer_response is not None and transfer_response.status_code in [200, 201, 202]:
-            return True, ''
-
-        return False, 'Bulk stock transfer request failed'
+        return _BarcodeApiHelpers.transfer_stock_items_bulk(self, transfer_items, location_pk)
     
     def _on_submit(self, _):
         """Submit scanned items for import."""
@@ -2089,77 +2166,7 @@ class BarcodeAssignmentView(MainView):
         self._update_results_table_throttled(force=True)
 
     def _find_part_by_lookup(self, lookup_value: str) -> Optional[Dict]:
-        cache_key = str(lookup_value or '').strip().lower()
-        if not cache_key:
-            return None
-
-        with self._part_lookup_lock:
-            if cache_key in self._part_lookup_cache:
-                return self._part_lookup_cache[cache_key]
-
-            wait_event = self._part_lookup_inflight.get(cache_key)
-            is_leader = wait_event is None
-            if is_leader:
-                wait_event = threading.Event()
-                self._part_lookup_inflight[cache_key] = wait_event
-
-        if not is_leader:
-            wait_event.wait(timeout=20.0)
-            with self._part_lookup_lock:
-                return self._part_lookup_cache.get(cache_key)
-
-        result = None
-        try:
-            api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
-            if not api_obj:
-                result = None
-            else:
-                token = getattr(api_obj, 'token', None)
-                base_url = getattr(api_obj, 'base_url', '')
-                if not token or not base_url:
-                    result = None
-                else:
-                    endpoint = f"{base_url.rstrip('/')}/api/part/"
-                    headers = {
-                        'Authorization': f'Token {token}',
-                        'Accept': 'application/json',
-                    }
-                    response = self._request_with_retries(
-                        method='GET',
-                        url=endpoint,
-                        headers=headers,
-                        params={'search': lookup_value, 'limit': 5},
-                        timeout=20,
-                    )
-                    if response is not None:
-                        payload = response.json()
-
-                        if isinstance(payload, dict):
-                            rows = payload.get('results') or []
-                        elif isinstance(payload, list):
-                            rows = payload
-                        else:
-                            rows = []
-
-                        if rows:
-                            needle = lookup_value.strip().lower()
-                            for candidate in rows:
-                                ipn = str(candidate.get('IPN') or '').strip().lower()
-                                name = str(candidate.get('name') or '').strip().lower()
-                                if needle and (needle == ipn or needle == name):
-                                    result = candidate
-                                    break
-
-                            if result is None:
-                                result = rows[0]
-        finally:
-            with self._part_lookup_lock:
-                self._part_lookup_cache[cache_key] = result
-                inflight_event = self._part_lookup_inflight.pop(cache_key, None)
-                if inflight_event is not None:
-                    inflight_event.set()
-
-        return result
+        return _BarcodeApiHelpers.find_part_by_lookup(self, lookup_value)
 
     def _ensure_location_path_cache(self):
         """Load full stock-location id->path map once to avoid per-row tree API calls."""
@@ -2262,11 +2269,7 @@ class BarcodeAssignmentView(MainView):
             self._location_path_to_pk_cache[path] = loc_pk
 
     def _normalize_stock_location_value(self, location: str) -> str:
-        return '/'.join(
-            part.strip()
-            for part in re.sub(r'^-+\s+', '', str(location or '').strip()).split('/')
-            if part.strip()
-        )
+        return _BarcodeApiHelpers.normalize_stock_location_value(location)
 
     def _get_stock_location_pk(self, location: str) -> int:
         location_pk = inventree_interface.resolve_stock_location_pk(location, self._location_path_to_pk_cache)
@@ -2277,141 +2280,10 @@ class BarcodeAssignmentView(MainView):
         return location_pk
 
     def _resolve_location_string(self, part: Dict) -> str:
-        """Resolve location display string from part payload (name or id)."""
-        location_name = str(part.get('default_location_name') or '').strip()
-        if location_name:
-            return location_name
-
-        location_id = part.get('default_location')
-        if location_id in [None, '', 'None']:
-            return '-'
-
-        try:
-            location_id = int(location_id)
-        except (TypeError, ValueError):
-            return str(location_id)
-
-        try:
-            location_tree = inventree_interface.inventree_api.get_stock_location_tree(location_id)
-            # API helper returns leaf->root insertion order, so reverse for root->leaf
-            names = [str(name) for name in reversed(list(location_tree.values())) if str(name).strip()]
-            if names:
-                return '/'.join(names)
-        except Exception:
-            pass
-
-        return str(location_id)
+        return _BarcodeApiHelpers.resolve_location_string(part)
 
     def _fetch_part_barcodes(self, part_pk: int) -> List[str]:
-        """Fetch current external barcode values for a part via /api/barcode/."""
-        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
-        if not api_obj:
-            return []
-
-        token = getattr(api_obj, 'token', None)
-        base_url = getattr(api_obj, 'base_url', '')
-        if not token or not base_url:
-            return []
-
-        endpoint = f"{base_url.rstrip('/')}/api/barcode/"
-        headers = {
-            'Authorization': f'Token {token}',
-            'Accept': 'application/json',
-        }
-
-        # Probe endpoint only once: some server versions disable GET /api/barcode/.
-        if self._barcode_endpoint_available is None:
-            try:
-                probe_response = self._http.get(
-                    endpoint,
-                    headers=headers,
-                    params={'limit': 1},
-                    timeout=6,
-                )
-                self._barcode_endpoint_available = probe_response.status_code not in [404, 405]
-            except Exception:
-                self._barcode_endpoint_available = False
-
-        if not self._barcode_endpoint_available:
-            return []
-
-        def _extract_values(payload) -> List[str]:
-            if isinstance(payload, dict):
-                rows = payload.get('results') or []
-            elif isinstance(payload, list):
-                rows = payload
-            else:
-                rows = []
-
-            values: List[str] = []
-            for item in rows:
-                if not isinstance(item, dict):
-                    continue
-                # Server variants can expose different key names
-                barcode_value = item.get('data') or item.get('barcode') or item.get('value')
-                if barcode_value:
-                    values.append(str(barcode_value))
-            return values
-
-        # Try filtered query first.
-        try:
-            response = self._request_with_retries(
-                method='GET',
-                url=endpoint,
-                headers=headers,
-                params={'part': part_pk, 'limit': 100},
-                timeout=20,
-            )
-            if response is None:
-                return []
-            values = _extract_values(response.json())
-            if values:
-                return values
-        except Exception:
-            pass
-
-        # Fallback for servers where filtering differs: fetch and client-filter.
-        try:
-            response = self._request_with_retries(
-                method='GET',
-                url=endpoint,
-                headers=headers,
-                params={'limit': 200},
-                timeout=20,
-            )
-            if response is None:
-                return []
-            payload = response.json()
-            if isinstance(payload, dict):
-                rows = payload.get('results') or []
-            elif isinstance(payload, list):
-                rows = payload
-            else:
-                rows = []
-
-            values: List[str] = []
-            for item in rows:
-                if not isinstance(item, dict):
-                    continue
-                part_ref = item.get('part')
-                item_part_pk = None
-                if isinstance(part_ref, dict):
-                    item_part_pk = part_ref.get('pk') or part_ref.get('id')
-                else:
-                    item_part_pk = part_ref
-
-                try:
-                    if int(item_part_pk) != int(part_pk):
-                        continue
-                except Exception:
-                    continue
-
-                barcode_value = item.get('data') or item.get('barcode') or item.get('value')
-                if barcode_value:
-                    values.append(str(barcode_value))
-            return values
-        except Exception:
-            return []
+        return _BarcodeApiHelpers.fetch_part_barcodes(self, part_pk)
 
     def _generate_part_barcode(self, part_pk: int) -> str:
         """Generate or fetch internal barcode string for a part via barcode API."""
@@ -2576,179 +2448,16 @@ class BarcodeAssignmentView(MainView):
             return updated, failed, str(exc)
 
     def _collect_transfer_items_for_part(self, part_pk: int, location_pk: int) -> tuple[List[Dict], str]:
-        """Collect transferable stock-item payload rows for a part."""
-        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
-        if not api_obj:
-            return [], 'Missing InvenTree API object'
-
-        token = getattr(api_obj, 'token', None)
-        base_url = getattr(api_obj, 'base_url', '')
-        if not token or not base_url:
-            return [], 'Missing InvenTree auth context'
-
-        headers = {
-            'Authorization': f'Token {token}',
-            'Accept': 'application/json',
-        }
-
-        transfer_items: List[Dict] = []
-
-        try:
-            url = f"{base_url.rstrip('/')}/api/stock/"
-            params = {'part': part_pk, 'limit': 250}
-
-            while url:
-                response = self._request_with_retries(
-                    method='GET',
-                    url=url,
-                    headers=headers,
-                    params=params,
-                    timeout=20,
-                )
-                if response is None:
-                    return transfer_items, 'Failed to list stock items after retries'
-                payload = response.json()
-
-                if isinstance(payload, dict):
-                    rows = payload.get('results') or []
-                    next_url = payload.get('next')
-                elif isinstance(payload, list):
-                    rows = payload
-                    next_url = None
-                else:
-                    rows = []
-                    next_url = None
-
-                for item in rows:
-                    item_pk = item.get('pk') or item.get('id')
-                    if not item_pk:
-                        continue
-
-                    current_loc = item.get('location')
-                    try:
-                        if current_loc is not None and int(current_loc) == int(location_pk):
-                            continue
-                    except Exception:
-                        pass
-
-                    try:
-                        transfer_items.append(
-                            {
-                                'pk': int(item_pk),
-                                'quantity': str(item.get('quantity') or '0'),
-                                'batch': str(item.get('batch') or ''),
-                                'packaging': str(item.get('packaging') or ''),
-                                'status': int(item.get('status') or 0),
-                            }
-                        )
-                    except Exception:
-                        continue
-
-                url = next_url
-                params = {}
-
-            return transfer_items, ''
-        except Exception as exc:
-            return transfer_items, str(exc)
+        return _BarcodeApiHelpers.collect_transfer_items_for_part(self, part_pk, location_pk)
 
     def _transfer_stock_items_bulk(self, transfer_items: List[Dict], location_pk: int) -> tuple[bool, str]:
-        """Transfer multiple stock items to one location in a single API call."""
-        if not transfer_items:
-            return True, ''
-
-        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
-        if not api_obj:
-            return False, 'Missing InvenTree API object'
-
-        token = getattr(api_obj, 'token', None)
-        base_url = getattr(api_obj, 'base_url', '')
-        if not token or not base_url:
-            return False, 'Missing InvenTree auth context'
-
-        headers = {
-            'Authorization': f'Token {token}',
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-        }
-        transfer_endpoint = f"{base_url.rstrip('/')}/api/stock/transfer/"
-        transfer_payload = {
-            'items': transfer_items,
-            'location': int(location_pk),
-            'notes': 'Ki-nTree bulk location update',
-        }
-        transfer_response = self._request_with_retries(
-            method='POST',
-            url=transfer_endpoint,
-            headers=headers,
-            json=transfer_payload,
-            timeout=45,
-        )
-
-        if transfer_response is not None and transfer_response.status_code in [200, 201, 202]:
-            return True, ''
-
-        return False, 'Bulk stock transfer request failed'
+        return _BarcodeApiHelpers.transfer_stock_items_bulk(self, transfer_items, location_pk)
 
     def _set_part_default_location(self, part_pk: int, location_pk: int) -> bool:
-        """Set part default location using direct API patch with retries."""
-        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
-        if not api_obj:
-            return False
-
-        token = getattr(api_obj, 'token', None)
-        base_url = getattr(api_obj, 'base_url', '')
-        if not token or not base_url:
-            return False
-
-        endpoint = f"{base_url.rstrip('/')}/api/part/{int(part_pk)}/"
-        headers = {
-            'Authorization': f'Token {token}',
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-        }
-
-        response = self._request_with_retries(
-            method='PATCH',
-            url=endpoint,
-            headers=headers,
-            json={'default_location': int(location_pk)},
-            timeout=20,
-        )
-        return response is not None and response.status_code in [200, 202]
+        return _BarcodeApiHelpers.set_part_default_location(self, part_pk, location_pk)
 
     def _link_part_barcode(self, part_pk: int, barcode_value: str) -> bool:
-        """Link barcode to part using direct API call with retries."""
-        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
-        if not api_obj:
-            return False
-
-        token = getattr(api_obj, 'token', None)
-        base_url = getattr(api_obj, 'base_url', '')
-        if not token or not base_url:
-            return False
-
-        endpoint = f"{base_url.rstrip('/')}/api/barcode/link/"
-        headers = {
-            'Authorization': f'Token {token}',
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-        }
-
-        payload = {
-            'barcode': str(barcode_value or '').strip(),
-            'part': int(part_pk),
-        }
-        if not payload['barcode']:
-            return False
-
-        response = self._request_with_retries(
-            method='POST',
-            url=endpoint,
-            headers=headers,
-            json=payload,
-            timeout=20,
-        )
-        return response is not None and response.status_code in [200, 201, 202]
+        return _BarcodeApiHelpers.link_part_barcode(self, part_pk, barcode_value)
 
     @staticmethod
     def _location_leaf(location: str) -> str:
