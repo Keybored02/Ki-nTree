@@ -267,10 +267,14 @@ class DropdownWithSearch(ft.UserControl):
         sr_animate=100,
         options=None,
         on_change=None,
+        on_submit=None,
+        on_search_open=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._options = options
+        self._on_submit = on_submit
+        self._on_search_open = on_search_open
         self.dropdown = ft.Dropdown(
             label=label,
             width=dr_width,
@@ -287,6 +291,7 @@ class DropdownWithSearch(ft.UserControl):
             width=sr_width,
             dense=dense,
             on_change=self.on_search,
+            on_submit=self._on_search_submit,
         )
         self.search_box = ft.Container(
             content=self.search_field,
@@ -384,7 +389,16 @@ class DropdownWithSearch(ft.UserControl):
         if self.on_change:
             self.on_change()
 
+    def _on_search_submit(self, e):
+        """Called when Enter is pressed in the search field (e.g. scanner sends Enter).
+        Closes the search box, then fires the optional on_submit callback."""
+        self.done_search()
+        if self._on_submit:
+            self._on_submit(e)
+
     def search_now(self, e):
+        if self._on_search_open:
+            self._on_search_open()
         self.search_box.width = self.search_width
         self._safe_update(self.search_box)
         self.search_button.icon = 'highlight_remove'

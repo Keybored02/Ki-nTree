@@ -1358,7 +1358,7 @@ class BarcodeImportView(MainView):
         # Clear button
         self.fields['barcode_clear'] = ft.ElevatedButton(
             text='Clear Input',
-            on_click=lambda _: setattr(self.fields['barcode_input'], 'value', '') or self.fields['barcode_input'].update(),
+            on_click=self._on_clear_input,
         )
         
         # Parse button (for multi-line pastes)
@@ -1390,6 +1390,8 @@ class BarcodeImportView(MainView):
             ],
             rows=[],
             horizontal_lines=ft.border.BorderSide(1, ft.colors.OUTLINE),
+            column_spacing=12,
+            horizontal_margin=8,
         )
         
         # Category search/dropdown control (scan-friendly)
@@ -1400,8 +1402,9 @@ class BarcodeImportView(MainView):
             dense=GUI_PARAMS['textfield_dense'],
             options=[],
             on_change=self._on_category_changed,
+            on_submit=self.focus_barcode_input,
         )
-        
+
         # Location search/dropdown control (scan-friendly)
         self.fields['location_select'] = DropdownWithSearch(
             label='Stock Location (All Items)',
@@ -1410,6 +1413,7 @@ class BarcodeImportView(MainView):
             dense=GUI_PARAMS['textfield_dense'],
             options=[],
             on_change=self._on_location_changed,
+            on_submit=self.focus_barcode_input,
         )
 
         self.fields['reload_categories'] = ft.IconButton(
@@ -1418,10 +1422,10 @@ class BarcodeImportView(MainView):
             on_click=self._reload_categories,
         )
 
-        self.fields['clear_category_location_top'] = ft.IconButton(
+        self.fields['clear_category'] = ft.IconButton(
             icon=ft.icons.CLEAR,
-            tooltip='Clear category and location selections',
-            on_click=self._clear_category_location,
+            tooltip='Clear global category selection',
+            on_click=self._clear_category,
         )
 
         self.fields['reload_locations'] = ft.IconButton(
@@ -1430,10 +1434,10 @@ class BarcodeImportView(MainView):
             on_click=self._reload_locations,
         )
 
-        self.fields['clear_category_location'] = ft.IconButton(
+        self.fields['clear_location'] = ft.IconButton(
             icon=ft.icons.CLEAR,
-            tooltip='Clear category and location selections',
-            on_click=self._clear_category_location,
+            tooltip='Clear global location selection',
+            on_click=self._clear_location,
         )
         
         # Create stock checkbox
@@ -1446,17 +1450,19 @@ class BarcodeImportView(MainView):
         self.fields['use_manufacturer_barcode_check'] = ft.Checkbox(
             label='Use manufacturer PN as barcode',
             value=True,
-            on_change=lambda _: self._update_results_table(),
+            on_change=lambda _: (self._update_results_table(), self.focus_barcode_input()),
         )
 
         self.fields['force_barcode_reassign_check'] = ft.Checkbox(
             label='Force barcode reassignments (overwrite existing)',
             value=False,
+            on_change=lambda _: self.focus_barcode_input(),
         )
 
         self.fields['assign_all_stock_items_location_check'] = ft.Checkbox(
             label='Assign selected location to all stock items of the part',
             value=True,
+            on_change=lambda _: self.focus_barcode_input(),
         )
 
         self.fields['po_flow_check'] = ft.Checkbox(
@@ -1465,13 +1471,14 @@ class BarcodeImportView(MainView):
             on_change=self._on_po_flow_changed,
         )
         
-        # Submit button
+        # Submit button — starts disabled; enabled once every row has a category.
         self.fields['barcode_submit'] = ft.ElevatedButton(
             text='Import All',
             on_click=self._on_submit,
             color='white',
             bgcolor='green',
             width=200,
+            disabled=True,
         )
         
         # Status message
@@ -1479,12 +1486,18 @@ class BarcodeImportView(MainView):
         self.fields['import_progress'] = ft.ProgressBar(value=0, visible=False, height=8)
         self.fields['import_progress_message'] = ft.Text(value='', size=11, color='blue')
         
-        # Build layout - set self.column instead of self.page.content
+        # Build layout - set self.column instead of self.page.content.
+        # GestureDetector catches taps on blank space and refocuses the barcode
+        # input. Child controls consume their own taps first, so interactive
+        # widgets (text fields, dropdowns, buttons) are unaffected.
         self.column = ft.Column(
             controls=[
-                ft.Container(
-                    content=ft.Column(
-                        controls=[
+                ft.GestureDetector(
+                    on_tap=self.focus_barcode_input,
+                    expand=True,
+                    content=ft.Container(
+                        content=ft.Column(
+                            controls=[
                             ft.Row([ft.Text('Barcode Import', style=ft.TextThemeStyle.HEADLINE_MEDIUM)]),
                             ft.Divider(),
                             
@@ -1515,12 +1528,12 @@ class BarcodeImportView(MainView):
                                     ft.Row([
                                         self.fields['category_select'],
                                         self.fields['reload_categories'],
-                                        self.fields['clear_category_location_top'],
+                                        self.fields['clear_category'],
                                     ]),
                                     ft.Row([
                                         self.fields['location_select'],
                                         self.fields['reload_locations'],
-                                        self.fields['clear_category_location'],
+                                        self.fields['clear_location'],
                                     ]),
                                 ],
                                 spacing=8,
@@ -1558,10 +1571,11 @@ class BarcodeImportView(MainView):
                     padding=20,
                     expand=True,
                 ),
+                ),
             ],
             expand=True,
         )
-        
+
         self.focus_barcode_input()
 
     def did_mount(self):
@@ -1569,7 +1583,7 @@ class BarcodeImportView(MainView):
         self.focus_barcode_input()
         return super().did_mount()
 
-    def focus_barcode_input(self):
+    def focus_barcode_input(self, *_, **__):
         """Focus scanner input so cursor is ready when entering this page."""
         try:
             self.fields['barcode_input'].focus()
@@ -1787,6 +1801,7 @@ class BarcodeImportView(MainView):
         self._show_status(f'Parsed {success} items ({failed} failed)', color='green' if success > 0 else 'red')
         if failed:
             self.show_dialog(DialogType.ERROR, f'Unrecognized barcode format for {failed} item(s)')
+        self.focus_barcode_input()
     
     def _update_results_table(self):
         """Refresh the results table with current scanned items."""
@@ -1822,7 +1837,6 @@ class BarcodeImportView(MainView):
             else:
                 barcode_text = ''
             qty_text = str(row.quantity) if row.supplier != 'unknown' else ''
-            category_text = self._truncate_text(str(row.category or ''), max_len=90)
             part_text = self._truncate_text(part_text, max_len=100)
             status_text = self._truncate_text(status_text, max_len=45)
             status_lower = status_text.lower()
@@ -1835,6 +1849,29 @@ class BarcodeImportView(MainView):
             else:
                 status_color = 'orange'
 
+            # Category cell: show text if already set, otherwise show inline
+            # search-enabled dropdown (mirrors the global DropdownWithSearch).
+            if row.category:
+                category_cell_content = ft.Text(
+                    self._truncate_text(str(row.category), max_len=90),
+                    size=12,
+                    no_wrap=False,
+                    max_lines=2,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                )
+            else:
+                all_cat_options = list(getattr(self, 'categories', []))
+                category_cell_content = ft.Container(
+                    width=200,
+                    content=ft.AutoComplete(
+                        suggestions=[
+                            ft.AutoCompleteSuggestion(key=c, value=c)
+                            for c in all_cat_options
+                        ],
+                        on_select=lambda e, i=idx: self._set_row_category(i, e.selection.value),
+                    ),
+                )
+
             rows.append(ft.DataRow(
                 cells=[
                     ft.DataCell(ft.Text(input_code, size=12, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
@@ -1845,7 +1882,7 @@ class BarcodeImportView(MainView):
                     ft.DataCell(ft.Text(location_text, size=12, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
                     ft.DataCell(ft.Text(barcode_text, size=11, color='gray', no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
                     ft.DataCell(ft.Text(qty_text, size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)),
-                    ft.DataCell(ft.Text(category_text, size=12, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
+                    ft.DataCell(category_cell_content),
                     ft.DataCell(ft.Checkbox(
                         value=row.create_stock,
                         disabled=bool(self.fields.get('po_flow_check').value),
@@ -1856,6 +1893,7 @@ class BarcodeImportView(MainView):
             ))
 
         self.fields['results_table'].rows = rows
+        self._refresh_import_button_state()
         try:
             self._page.update()
         except AssertionError:
@@ -2321,8 +2359,10 @@ class BarcodeImportView(MainView):
 
             if part_category and not part_category.isdigit():
                 row.category = part_category
+                row._category_from_part = True
             else:
                 row.category = ''
+                row._category_from_part = False
 
             row.barcode_hash = str(part.get('barcode_hash') or '').strip()
 
@@ -2353,6 +2393,7 @@ class BarcodeImportView(MainView):
         if 0 <= idx < len(self.scanned_rows):
             self.scanned_rows.pop(idx)
             self._update_results_table()
+        self.focus_barcode_input()
 
     def _clear_all_rows(self, _):
         """Clear all scanned rows."""
@@ -2362,18 +2403,32 @@ class BarcodeImportView(MainView):
         self._recent_scan_codes.clear()
         self._update_results_table()
         self._show_status('Cleared all scanned items', color='blue')
-    
+        self.focus_barcode_input()
+
+    def _on_clear_input(self, _):
+        """Clear the barcode input field and return focus to it."""
+        self.fields['barcode_input'].value = ''
+        try:
+            self.fields['barcode_input'].update()
+        except AssertionError:
+            pass
+        self.focus_barcode_input()
+
     def _on_category_changed(self, *args, **kwargs):
-        """Apply selected category to all items."""
+        """Apply selected category to all items that don't already have one."""
         category = self.fields['category_select'].value
         if category:
             for row in self.scanned_rows:
-                if not int(getattr(row, 'part_pk', 0) or 0):
+                # Apply to new parts (no part_pk) and to existing parts that have no category set.
+                if not row.category:
                     row.category = category
             self._update_results_table()
-    
+        self._refresh_import_button_state()
+        # No focus_barcode_input() here — the dropdown search field fires on_change
+        # on every keystroke; stealing focus mid-type would cut off the search query.
+
     def _on_location_changed(self, *args, **kwargs):
-        """Apply selected location to all items."""
+        """Apply selected location to all items that don't already have one."""
         location_value = self.fields['location_select'].value
         if location_value:
             location = str(location_value)
@@ -2384,10 +2439,13 @@ class BarcodeImportView(MainView):
             except (ValueError, TypeError):
                 pass
             for row in self.scanned_rows:
-                if not int(getattr(row, 'part_pk', 0) or 0):
+                # Only set if the row has no location yet — never override an
+                # existing location (whether from the part API or a prior pick).
+                if not row.location:
                     row.location = location
             self._update_results_table()
-    
+        # No focus_barcode_input() here — same reason as _on_category_changed.
+
     def _on_create_stock_changed(self, _):
         """Apply create_stock flag to all items."""
         if bool(self.fields.get('po_flow_check').value):
@@ -2402,6 +2460,7 @@ class BarcodeImportView(MainView):
         for row in self.scanned_rows:
             row.create_stock = create_stock
         self._update_results_table()
+        self.focus_barcode_input()
 
     def _on_po_flow_changed(self, _):
         """Toggle PO flow controls and keep stock controls consistent."""
@@ -2422,28 +2481,29 @@ class BarcodeImportView(MainView):
             pass
 
         self._update_results_table()
+        self.focus_barcode_input()
 
-    def _clear_category_location(self, _):
-        """Clear global category/location selections and row overrides."""
+    def _clear_category(self, _):
+        """Clear only the global category dropdown. Per-row categories are untouched."""
         self.fields['category_select'].value = None
-        self.fields['location_select'].value = None
-
-        for row in self.scanned_rows:
-            if not int(getattr(row, 'part_pk', 0) or 0):
-                row.category = ''
-                row.location = ''
-            else:
-                row.location = ''
-
         try:
             self.fields['category_select'].update()
+        except AssertionError:
+            pass
+        self._refresh_import_button_state()
+        self._show_status('Cleared category selection', color='blue')
+        self.focus_barcode_input()
+
+    def _clear_location(self, _):
+        """Clear only the global location dropdown. Per-row locations are untouched."""
+        self.fields['location_select'].value = None
+        try:
             self.fields['location_select'].update()
         except AssertionError:
             pass
+        self._show_status('Cleared location selection', color='blue')
+        self.focus_barcode_input()
 
-        self._update_results_table()
-        self._show_status('Cleared category and location selections', color='blue')
-    
     def _toggle_create_stock(self, idx: int):
         """Toggle create_stock for a specific row."""
         if bool(self.fields.get('po_flow_check').value):
@@ -2451,7 +2511,34 @@ class BarcodeImportView(MainView):
         if 0 <= idx < len(self.scanned_rows):
             self.scanned_rows[idx].create_stock = not self.scanned_rows[idx].create_stock
             self._update_results_table()
-    
+        self.focus_barcode_input()
+
+    def _set_row_category(self, idx: int, category: str):
+        """Set category for a specific row from the inline per-row autocomplete."""
+        if 0 <= idx < len(self.scanned_rows) and category:
+            self.scanned_rows[idx].category = category
+            self._update_results_table()
+        self.focus_barcode_input()
+
+    def _refresh_import_button_state(self):
+        """Enable Import All only when every row has a category assigned."""
+        btn = self.fields.get('barcode_submit')
+        if btn is None:
+            return
+        if not self.scanned_rows:
+            btn.disabled = True
+        else:
+            global_category = self.fields['category_select'].value if self.fields.get('category_select') else None
+            all_have_category = all(
+                bool(row.category) or bool(global_category)
+                for row in self.scanned_rows
+            )
+            btn.disabled = not all_have_category
+        try:
+            btn.update()
+        except AssertionError:
+            pass
+
     def _show_status(self, message: str, color: str = 'black'):
         """Show status message."""
         self.fields['status_message'].value = message
@@ -2596,6 +2683,21 @@ class BarcodeImportView(MainView):
                 )
                 return
 
+        # Ensure every item has a category (either from the part itself, a global
+        # selection, or a per-row pick).
+        global_category = self.fields['category_select'].value if self.fields.get('category_select') else None
+        missing_category = [
+            row for row in self.scanned_rows
+            if not row.category and not global_category
+        ]
+        if missing_category:
+            self.show_dialog(
+                DialogType.ERROR,
+                f'{len(missing_category)} item(s) are missing a category. '
+                'Set a global category or pick one per item.'
+            )
+            return
+
         # Reset transient caches before each run to avoid stale session state from
         # suppressing valid lookups in long UI sessions.
         with self._part_lookup_lock:
@@ -2689,7 +2791,7 @@ class BarcodeImportView(MainView):
                         result['failure'] = f'{row.search_name}: Existing part has invalid PK'
                         return result
 
-                    part_name = str(existing_part.get('name') or existing_part.get('IPN') or row.search_name or '').strip()
+                    _ = str(existing_part.get('name') or existing_part.get('IPN') or row.search_name or '').strip()
 
                     # Existing-part path: Assign workflow semantics.
                     if assign_location_existing and not po_flow_enabled:
@@ -2800,13 +2902,14 @@ class BarcodeImportView(MainView):
                         }
 
                 with self._part_create_lock:
-                    new_part, part_pk, _ = inventree_interface.inventree_create(
+                    _create_result = inventree_interface.inventree_create(
                         part_info=part_form,
                         kicad=False,
                         show_progress=False,
                         is_custom=False,
                         stock=None,
                     )
+                    part_pk = _create_result[1] if _create_result else None
 
                 if not part_pk:
                     # If concurrent import created the same part first, try resolving it.

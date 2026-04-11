@@ -47,6 +47,7 @@ def init_gui(page: ft.Page):
     page.window.title_bar_hidden = False
     page.window.maximizable = True
     page.window.resizable = True
+    page.window.maximized = True
 
     # Reflow when the window is resized / restored.
     page.on_resize = lambda e: _stabilize_layout(page)
