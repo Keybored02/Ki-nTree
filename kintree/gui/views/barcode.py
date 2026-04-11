@@ -2341,21 +2341,41 @@ class BarcodeImportView(MainView):
             if not row.location:
                 row.location = self._resolve_location_string(part)
 
-            # Fetch and set existing part category label without extra API calls.
+            # Fetch and set existing part category as a full path string so it
+            # matches the format used by the dropdown options (e.g. "Electronics / Resistors / SMD").
+            # Prefer pathstring over bare name at every level to avoid leaf-only mismatch.
             part_category = ''
-            raw_category_name = part.get('category_name')
-            if raw_category_name not in [None, '']:
-                part_category = str(raw_category_name).strip()
 
-            if not part_category:
-                category_detail = part.get('category_detail')
-                if isinstance(category_detail, dict):
-                    part_category = str(category_detail.get('pathstring') or category_detail.get('name') or '').strip()
+            category_detail = part.get('category_detail')
+            if isinstance(category_detail, dict):
+                part_category = str(category_detail.get('pathstring') or category_detail.get('name') or '').strip()
 
             if not part_category:
                 raw_category = part.get('category')
                 if isinstance(raw_category, dict):
                     part_category = str(raw_category.get('pathstring') or raw_category.get('name') or '').strip()
+
+            if not part_category:
+                raw_category_name = part.get('category_name')
+                if raw_category_name not in [None, '']:
+                    part_category = str(raw_category_name).strip()
+
+            # If we only got a leaf name (InvenTree returned category as an ID
+            # rather than an expanded object), resolve it to the full path by
+            # matching against the loaded category tree so it aligns with the
+            # dropdown options (e.g. "--- Mechanical / Fasteners / Standoffs and Spacers").
+            # Only substitute if there is exactly one match — ambiguous leaves are left as-is.
+            if part_category and not part_category.isdigit():
+                categories = list(getattr(self, 'categories', []))
+                if categories:
+                    leaf = part_category.split('/')[-1].strip()
+                    matches = [
+                        c for c in categories
+                        # Strip leading dashes+space, then take the last path segment.
+                        if re.sub(r'^-+\s*', '', c).split('/')[-1].strip() == leaf
+                    ]
+                    if len(matches) == 1:
+                        part_category = matches[0]
 
             if part_category and not part_category.isdigit():
                 row.category = part_category
