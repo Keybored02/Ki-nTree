@@ -223,7 +223,7 @@ class MainView(CommonView):
     def sanitize_data(self):
         return
 
-    def push_data(self, e=None, hidden={}):
+    def push_data(self, e=None, hidden={}, **kwargs):
         for key, field in self.fields.items():
             try:
                 self.data[key] = field.value
@@ -411,7 +411,7 @@ class PartSearchView(MainView):
             self._page.update()
         return
 
-    def push_data(self, e=None):
+    def push_data(self, e=None, **kwargs):
         hidden_fields = {
             'searched_part_number': self.fields['part_number'].value,
             'custom_part': self.data.get('custom_part', None),
@@ -1069,7 +1069,7 @@ class KicadView(MainView):
             self.fields['Footprint'].disabled = self.fields['New Footprint'].value
             self.fields['Footprint'].update()
         
-    def push_data(self, e=None, label=None, value=None):
+    def push_data(self, e=None, label=None, value=None, **_):
         super().push_data(e)
         if label or e:
             try:
