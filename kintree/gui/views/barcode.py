@@ -3322,6 +3322,7 @@ class BarcodeImportView(MainView):
             for warning in collect_errors[:5]:
                 cprint(f'[BARCODE]\tStock collect warning: {warning}', silent=False)
 
+        failed_rows: List[BarcodeScannedRow] = []
         for result in sorted(row_results, key=lambda item: item.get('idx', 0)):
             if result.get('ok'):
                 success += 1
@@ -3329,23 +3330,16 @@ class BarcodeImportView(MainView):
                 failed += 1
                 if result.get('failure'):
                     failures.append(result['failure'])
-        
-        # Show summary
-        summary = f'Import complete:\n  ✓ Success: {success}\n  ✗ Failed: {failed}'
-        if failures:
-            summary += '\n\nFailures:'
-            for fail in failures[:5]:
-                summary += f'\n  • {fail}'
-            if len(failures) > 5:
-                summary += f'\n  ... and {len(failures) - 5} more'
-        
+                if result.get('row'):
+                    failed_rows.append(result['row'])
+
+        # Remove only successful rows; keep failed ones in the list for inspection/retry.
         if failed == 0:
-            dlg_type = DialogType.VALID
-            # Clear and reset
             self.scanned_rows.clear()
-            self._update_results_table()
         else:
-            dlg_type = DialogType.WARNING
+            self.scanned_rows = failed_rows
+
+        self._update_results_table()
 
         self.fields['import_progress'].value = 1.0
         self.fields['import_progress'].color = 'green' if failed == 0 else ('amber' if success > 0 else 'red')
@@ -3358,11 +3352,71 @@ class BarcodeImportView(MainView):
         cprint(f'[BARCODE]\tTotal operation time: {elapsed_total:.1f} ms ({total} rows)', silent=False)
         if total:
             cprint(f'[BARCODE]\tAverage per row: {elapsed_total/total:.1f} ms', silent=False)
-
         cprint(f'[BARCODE]\tImport finished: success={success} failed={failed}', silent=False)
-        
-        self.show_dialog(dlg_type, summary)
+
         self._show_status(f'Import complete: {success} success, {failed} failed', color='green' if failed == 0 else 'orange')
+
+        if failed == 0:
+            # All good — brief snackbar is enough.
+            self.show_dialog(DialogType.VALID, f'All {success} item(s) imported successfully.')
+        else:
+            # Show a blocking modal so the user can read each failure before dismissing.
+            failure_items = [
+                ft.Row([
+                    ft.Icon(ft.icons.ERROR_OUTLINE, color=ft.colors.RED_400, size=16),
+                    ft.Text(f, size=12, selectable=True, expand=True),
+                ], spacing=6)
+                for f in failures
+            ]
+            dlg = ft.AlertDialog(
+                modal=True,
+                title=ft.Row([
+                    ft.Icon(ft.icons.WARNING_AMBER_ROUNDED, color=ft.colors.AMBER_700),
+                    ft.Text(
+                        f'Import finished with {failed} failure{"s" if failed != 1 else ""}',
+                        weight=ft.FontWeight.BOLD,
+                    ),
+                ], spacing=8),
+                content=ft.Container(
+                    width=520,
+                    content=ft.Column(
+                        controls=[
+                            ft.Text(
+                                f'{success} succeeded, {failed} failed. '
+                                'Failed items remain in the list.',
+                                size=13,
+                                color=ft.colors.ON_SURFACE_VARIANT,
+                            ),
+                            ft.Divider(height=8),
+                            ft.Column(
+                                controls=failure_items,
+                                scroll=ft.ScrollMode.AUTO,
+                                spacing=4,
+                                height=min(320, len(failure_items) * 36 + 16),
+                            ),
+                        ],
+                        spacing=4,
+                        tight=True,
+                    ),
+                ),
+                actions=[
+                    ft.TextButton(
+                        'OK',
+                        on_click=lambda e: (
+                            setattr(dlg, 'open', False),
+                            self._page.update(),
+                            self.focus_barcode_input(),
+                        ),
+                    ),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            self._page.dialog = dlg
+            dlg.open = True
+            try:
+                self._page.update()
+            except AssertionError:
+                pass
     
     @staticmethod
     def _resolve_supplier_key(supplier: str) -> str:
