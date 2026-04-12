@@ -505,7 +505,11 @@ def supplier_search(supplier: str, part_number: str, test_mode=False) -> dict:
         except AttributeError:
             cprint(f'\n[INFO]\tWarning: {supplier.upper()}_STORE value not found', silent=False)
 
-    search_filename = f"{settings.search_results['directory']}{supplier}{store}_{part_number}{settings.search_results['extension']}"
+    # Sanitize the part number for use as a filename: strip illegal characters
+    # and truncate so the full path stays within the 255-byte filename limit.
+    _safe_pn = re.sub(r'[\\/:*?"<>|\[\](){}\x00-\x1f]', '_', str(part_number))
+    _safe_pn = _safe_pn[:120]  # leave plenty of room for directory + supplier prefix + extension
+    search_filename = f"{settings.search_results['directory']}{supplier}{store}_{_safe_pn}{settings.search_results['extension']}"
     # Get cached data, if cache is enabled (else returns None)
     part_cache = search_api.load_from_file(search_filename, test_mode)
 
