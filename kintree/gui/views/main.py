@@ -616,11 +616,10 @@ class InventreeView(MainView):
             dense=GUI_PARAMS['textfield_dense'],
             options=[],
         ),
-        'Part barcode': ft.TextField(
-            label='Part Barcode (optional)',
+        'Part barcode': ft.Checkbox(
+            label='Assign barcode (supplier number → supplier part, manufacturer number → part)',
             disabled=not settings.ENABLE_INVENTREE,
-            width=GUI_PARAMS['textfield_width'],
-            dense=GUI_PARAMS['textfield_dense'],
+            value=False,
         ),
         'Stock quantity': ft.TextField(
             label='Stock Quantity',
@@ -946,6 +945,7 @@ class InventreeView(MainView):
                     controls=[
                         self.fields['Part barcode'],
                     ],
+                    width=GUI_PARAMS['dropdown_width'],
                 ),
                 ft.Column(
                     ref=self.create_stock_widgets_ref,
@@ -1393,16 +1393,55 @@ class CreateView(MainView):
         return tree or None
 
     @staticmethod
-    def _post_process_part(part_pk: int, location_tree=None, create_stock_enabled: bool = False, barcode_value: str = ''):
+    def _post_process_part(part_pk: int, location_tree=None, create_stock_enabled: bool = False, assign_barcode: bool = False, part_info: dict = None):
         if not part_pk:
             return
 
         if location_tree and not create_stock_enabled:
             inventree_interface.inventree_set_part_default_location(part_pk, location_tree)
 
-        barcode = str(barcode_value or '').strip()
-        if barcode:
-            inventree_interface.inventree_link_part_barcode(part_pk, barcode)
+        if assign_barcode and part_info:
+            manufacturer_pn = str(part_info.get('manufacturer_part_number') or '').strip()
+            supplier_pn = str(part_info.get('supplier_part_number') or '').strip()
+            # Assign supplier number to supplier part barcode, manufacturer number to part barcode.
+            # Use manufacturer_pn as the part barcode (same logic as barcode import page).
+            barcode_target = manufacturer_pn or supplier_pn
+            if barcode_target:
+                # Fetch existing barcodes and skip if already assigned.
+                try:
+                    api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+                    current_barcodes = []
+                    if api_obj:
+                        try:
+                            response = api_obj.get(f'/api/barcode/', params={'part': part_pk})
+                            if response and hasattr(response, 'json'):
+                                data = response.json()
+                                current_barcodes = [
+                                    str(item.get('barcode_data') or item.get('barcode') or '').strip()
+                                    for item in (data if isinstance(data, list) else data.get('results', []))
+                                ]
+                            elif isinstance(response, list):
+                                current_barcodes = [str(item.get('barcode_data') or '').strip() for item in response]
+                        except Exception:
+                            pass
+                    current_barcodes_normalized = {b.lower() for b in current_barcodes if b}
+                    if barcode_target.lower() in current_barcodes_normalized:
+                        cprint(f'[MAIN]\tBarcode already assigned to part {part_pk}, skipping', silent=settings.SILENT)
+                    else:
+                        barcode_ok = False
+                        for attempt in range(1, 4):
+                            try:
+                                barcode_ok = inventree_interface.inventree_link_part_barcode(part_pk, barcode_target)
+                                if barcode_ok:
+                                    break
+                            except Exception as exc:
+                                cprint(f'[MAIN]\tBarcode link attempt {attempt} failed: {str(exc)[:60]}', silent=False)
+                            if attempt < 3:
+                                time.sleep(0.5)
+                        if not barcode_ok:
+                            cprint(f'[MAIN]\tBarcode assignment failed for part {part_pk} after retries', silent=False)
+                except Exception as exc:
+                    cprint(f'[MAIN]\tBarcode post-process error: {str(exc)[:80]}', silent=False)
 
     @staticmethod
     def _parse_optional_bool(value):
@@ -1733,14 +1772,17 @@ class CreateView(MainView):
                 return result
 
             barcode_value = str(row_data.get('barcode', '') or '').strip()
-            if not barcode_value:
-                barcode_value = str(inv_data.get('Part barcode', '') or '').strip()
+            if barcode_value:
+                # Explicit barcode column in the Excel sheet — assign directly.
+                try:
+                    inventree_interface.inventree_link_part_barcode(part_pk, barcode_value)
+                except Exception as exc:
+                    cprint(f'[BULK]\tBarcode link failed for row {row_data["excel_row"]}: {str(exc)[:60]}', silent=False)
 
             self._post_process_part(
                 part_pk=part_pk,
                 location_tree=location_tree,
                 create_stock_enabled=create_stock_enabled,
-                barcode_value=barcode_value,
             )
 
             result['ok'] = True
@@ -2049,12 +2091,13 @@ class CreateView(MainView):
             else:
                 if part_pk:
                     location_tree = data_from_views['InvenTree'].get('Stock location', None)
-                    barcode = str(data_from_views['InvenTree'].get('Part barcode', '') or '').strip()
+                    assign_barcode = bool(data_from_views['InvenTree'].get('Part barcode', False))
                     self._post_process_part(
                         part_pk=part_pk,
                         location_tree=location_tree,
                         create_stock_enabled=bool(data_from_views['InvenTree'].get('Create stock')),
-                        barcode_value=barcode,
+                        assign_barcode=assign_barcode,
+                        part_info=part_info,
                     )
 
                     elapsed_total = (time.perf_counter() - create_start_ts) * 1000.0

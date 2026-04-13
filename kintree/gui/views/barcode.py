@@ -863,7 +863,7 @@ class _BarcodeApiHelpers:
         base_payload = {
             'supplier': int(supplier_pk),
             'supplier_reference': supplier_reference,
-            'description': 'Created by Ki-nTree barcode PO flow',
+            'description': 'Ki-nTree automatic creation',
         }
         payloads = [dict(base_payload)]
         if location_pk > 0:
@@ -3336,6 +3336,13 @@ class BarcodeImportView(MainView):
         # Remove only successful rows; keep failed ones in the list for inspection/retry.
         if failed == 0:
             self.scanned_rows.clear()
+            self.fields['category_select'].value = None
+            self.fields['location_select'].value = None
+            try:
+                self.fields['category_select'].update()
+                self.fields['location_select'].update()
+            except Exception:
+                pass
         else:
             self.scanned_rows = failed_rows
 
