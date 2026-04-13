@@ -2849,10 +2849,24 @@ class BarcodeImportView(MainView):
                                     if attempt < 3:
                                         time.sleep(0.5)
                             if not barcode_ok:
-                                cprint(
-                                    f'[WARN]\tBarcode reassignment failed for existing part {row.search_name} (barcode={barcode_target}) after retries',
-                                    silent=False,
-                                )
+                                # Re-fetch to check if the barcode is already assigned
+                                # (API may reject re-assignment of an identical value).
+                                recheck = self._fetch_part_barcodes(part_pk=part_pk)
+                                recheck_normalized = {
+                                    str(b or '').strip().lower()
+                                    for b in recheck
+                                    if str(b or '').strip()
+                                }
+                                if barcode_target.lower() in recheck_normalized:
+                                    cprint(
+                                        f'[INFO]\tBarcode already assigned to part {row.search_name} (barcode={barcode_target})',
+                                        silent=False,
+                                    )
+                                else:
+                                    cprint(
+                                        f'[WARN]\tBarcode reassignment failed for existing part {row.search_name} (barcode={barcode_target}) after retries',
+                                        silent=False,
+                                    )
 
                     result['ok'] = True
                     result['part_pk'] = int(part_pk)
