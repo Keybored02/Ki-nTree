@@ -6,32 +6,18 @@
 #   ...
 #   R09 / L06 / B01-B20
 
-# Number of top-level racks to create
-racks: 9
+# Create 30 simple sublocations BX031-BX060 under Temp
+racks: 30
+rack_offset: 30
+shelves_per_rack: 0
+boxes_per_shelf: 0
 
-# Number of shelves per rack
-shelves_per_rack: 6
-
-# Number of boxes per shelf
-boxes_per_shelf: 20
-
-# Location type assignments (by level)
-# Use location type name or pk (e.g. "Rack" or 2)
 location_types:
-  rack: "Rack"      # pk=2
-  shelf: "Shelf"    # pk=3
-  box: "Box"        # pk=4
+  rack: "Box"
+  shelf: null
+  box: null
 
-# Naming patterns for locations
-# Available variables:
-#   {i}    - auto-incrementing counter (1-indexed)
-#   {rack} - rack number
-#   {shelf} - shelf number
 naming_pattern:
-  rack: "R{i:02d}"
-  shelf: "L{i:02d}"
-  box: "R{rack:02d}-L{shelf:02d}-B{i:02d}"
-
-# Optional: parent location path
-# If specified, all racks will be created under this parent
-# Example: parent_path: "Genesy / Taverna"
+  rack: "BX{i:03d}"
+  shelf: "dummy"
+  box: "dummy"

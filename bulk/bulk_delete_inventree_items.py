@@ -306,8 +306,8 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    if not args.list_categories and not args.category_id and not args.category_name and not args.items:
-        print("ERROR: provide at least one of --category-id or --items")
+    if not args.list_categories and not args.category_id and not args.category_name and not args.items and not args.extra_filters:
+        print("ERROR: provide at least one of --category-id, --category-name, --items, or --extra-filters")
         return 2
 
     if not args.list_categories and not args.dry_run and not args.confirm:
@@ -385,11 +385,13 @@ def main() -> int:
             return 2
         payload["items"] = item_ids
     else:
-        if args.category_id is None:
-            print("ERROR: category id could not be determined")
-            return 2
-        filters = {"category": args.category_id}
+        filters = {}
+        if args.category_id is not None:
+            filters["category"] = args.category_id
         filters.update(_parse_extra_filters(args.extra_filters))
+        if not filters:
+            print("ERROR: no filters could be determined; provide --category-id, --category-name, or --extra-filters")
+            return 2
         payload["filters"] = filters
 
     print("Bulk-delete payload:")
@@ -426,8 +428,14 @@ def main() -> int:
         return 0
 
     # Execute delete (bulk when supported, sequential fallback otherwise).
+    # SDK bulkDelete only supports explicit item lists, not arbitrary filters.
+    use_sdk_bulk = (
+        model_class is not None
+        and hasattr(model_class, "bulkDelete")
+        and "items" in payload
+    )
     try:
-        if model_class is not None and hasattr(model_class, "bulkDelete"):
+        if use_sdk_bulk:
             print(f"Using SDK bulkDelete for model '{args.model}'")
             try:
                 result = model_class.bulkDelete(
@@ -447,10 +455,9 @@ def main() -> int:
                     print(result)
             return 0
 
-        # Fallback path for models that do not support bulkDelete (e.g. Part on many servers).
+        # Fallback path: filters-only payloads or models without SDK bulkDelete.
         print(
-            f"Model '{args.model}' does not support SDK bulkDelete on this environment; "
-            "falling back to sequential delete"
+            f"Using sequential delete for model '{args.model}'"
         )
 
         if "items" in payload:

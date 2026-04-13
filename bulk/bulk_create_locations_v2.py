@@ -298,59 +298,63 @@ def build_location_tree(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     racks = config.get("racks", 0)
     shelves_per_rack = config.get("shelves_per_rack", 0)
     boxes_per_shelf = config.get("boxes_per_shelf", 0)
-    
+    rack_offset = config.get("rack_offset", 0)
+
     naming_pattern = config.get("naming_pattern", {})
     rack_pattern = naming_pattern.get("rack", "RACK-{i:02d}")
     shelf_pattern = naming_pattern.get("shelf", "RACK-{rack}/SHELF-{i:02d}")
     box_pattern = naming_pattern.get("box", "RACK-{rack}/SHELF-{shelf}/BOX-{i:02d}")
-    
+
     # Build rack locations
     rack_indices: Dict[int, int] = {}  # rack_id -> index in locations
     for rack_idx in range(1, racks + 1):
-        rack_name = rack_pattern.format(i=rack_idx, rack=rack_idx)
+        display_idx = rack_idx + rack_offset
+        rack_name = rack_pattern.format(i=display_idx, rack=display_idx)
         rack_indices[rack_idx] = len(locations)
         locations.append({
             "name": rack_name,
-            "description": f"Rack {rack_idx}",
+            "description": f"Box {display_idx:02d}",
             "level": "rack",
             "parent_idx": None,
             "location_type_key": "rack",
-            "rack_id": rack_idx,
+            "rack_id": display_idx,
             "shelf_id": None,
             "box_id": None,
         })
     
     # Build shelf locations
-    shelf_indices: Dict[tuple, int] = {}  # (rack_id, shelf_id) -> index in locations
+    shelf_indices: Dict[tuple, int] = {}  # (rack_idx, shelf_id) -> index in locations
     for rack_idx in range(1, racks + 1):
+        display_rack_idx = rack_idx + rack_offset
         for shelf_idx in range(1, shelves_per_rack + 1):
-            shelf_name = shelf_pattern.format(rack=rack_idx, i=shelf_idx, shelf=shelf_idx)
+            shelf_name = shelf_pattern.format(rack=display_rack_idx, i=shelf_idx, shelf=shelf_idx)
             parent_rack_idx = rack_indices[rack_idx]
             shelf_indices[(rack_idx, shelf_idx)] = len(locations)
             locations.append({
                 "name": shelf_name,
-                "description": f"Shelf {shelf_idx}, Rack {rack_idx}",
+                "description": f"Box {shelf_idx:02d}",
                 "level": "shelf",
                 "parent_idx": parent_rack_idx,
                 "location_type_key": "shelf",
-                "rack_id": rack_idx,
+                "rack_id": display_rack_idx,
                 "shelf_id": shelf_idx,
                 "box_id": None,
             })
-    
+
     # Build box locations
     for rack_idx in range(1, racks + 1):
+        display_rack_idx = rack_idx + rack_offset
         for shelf_idx in range(1, shelves_per_rack + 1):
             for box_idx in range(1, boxes_per_shelf + 1):
-                box_name = box_pattern.format(rack=rack_idx, shelf=shelf_idx, i=box_idx)
+                box_name = box_pattern.format(rack=display_rack_idx, shelf=shelf_idx, i=box_idx)
                 parent_shelf_idx = shelf_indices[(rack_idx, shelf_idx)]
                 locations.append({
                     "name": box_name,
-                    "description": f"Box {box_idx}, Shelf {shelf_idx}, Rack {rack_idx}",
+                    "description": f"Box {box_idx:02d}",
                     "level": "box",
                     "parent_idx": parent_shelf_idx,
                     "location_type_key": "box",
-                    "rack_id": rack_idx,
+                    "rack_id": display_rack_idx,
                     "shelf_id": shelf_idx,
                     "box_id": box_idx,
                 })

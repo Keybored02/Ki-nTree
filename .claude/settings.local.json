@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python delete_taverna_leafs.py --dry-run)"
+    ]
+  }
+}
