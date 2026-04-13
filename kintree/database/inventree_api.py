@@ -195,6 +195,11 @@ def get_inventree_category_id(category_tree: list) -> int:
     ''' Get InvenTree category ID from name, specificy parent if subcategory '''
     global inventree_api
 
+    # Strip leading dashes and whitespace from each segment (e.g. '- MCUs/Boards' -> 'MCUs/Boards')
+    category_tree = [re.sub(r'^-+\s+', '', str(part).strip()) for part in category_tree if str(part).strip()]
+    if not category_tree:
+        return -1
+
     # Fetch all categories
     part_categories = PartCategory.list(inventree_api, name=category_tree[-1])
     if len(part_categories) == 1:

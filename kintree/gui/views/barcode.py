@@ -2959,11 +2959,13 @@ class BarcodeImportView(MainView):
                     result['failure'] = f'{row.search_name}: skipped new part creation (unknown supplier)'
                     return result
 
+                category_tree = inventree_interface.split_category_tree(row.category) if row.category else []
+
                 if not supplier_data:
                     part_form = {
                         'name': row.search_name,
                         'description': f'Imported from {row.supplier.upper()}',
-                        'category_tree': [row.category] if row.category else [],
+                        'category_tree': category_tree,
                     }
                 else:
                     part_form = inventree_interface.translate_supplier_to_form(
@@ -2972,8 +2974,8 @@ class BarcodeImportView(MainView):
                     )
                     part_form['name'] = row.search_name
 
-                if row.category:
-                    part_form['category_tree'] = [row.category]
+                if category_tree:
+                    part_form['category_tree'] = category_tree
                 else:
                     part_form.pop('category_tree', None)
 
