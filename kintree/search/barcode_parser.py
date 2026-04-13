@@ -358,6 +358,27 @@ class BarcodeParser:
                 return match.group(1).strip()
         return ''
 
+    # Mouser never encodes its own catalog number in the barcode.
+    # Both `1P` and `P` identifiers carry the manufacturer PN.
+    _MOUSER_MPN_TERMINATORS = r'(?:Q\d|11K|10K|14K|4L|1V|1T|9D|10D|30P|$)'
+
+    @staticmethod
+    def _extract_mouser_mpn(data: str) -> str:
+        """Extract Mouser MPN from raw barcode body.
+
+        Mouser's P/1P field value can begin with uppercase letters (e.g. ``KTSC-21R``)
+        which the generic ECIA walker misreads as new `K` identifiers. We anchor on
+        strong downstream terminators (`Q<digit>`, `11K`, `4L`, `1V`, ...) instead.
+        """
+        match = re.search(rf'1?P([A-Za-z0-9\-/.+]+?)(?={BarcodeParser._MOUSER_MPN_TERMINATORS})', data)
+        return match.group(1) if match else ''
+
+    @staticmethod
+    def _extract_mouser_manufacturer(data: str) -> str:
+        """Extract Mouser manufacturer name from the `1V` field (until end or next token)."""
+        match = re.search(r'1V([^\x1d\x1e]+?)(?=(?:1T|Q\d|11K|4L|$))', data)
+        return match.group(1).strip() if match else ''
+
     @staticmethod
     def parse_mouser(barcode: str) -> Dict:
         """Parse Mouser GS1-128 barcode using ISO/IEC 15434 standard.
@@ -369,6 +390,7 @@ class BarcodeParser:
         customer_order_number if not explicitly provided.
 
         Important: Mouser QR contains ONLY manufacturer_pn, no supplier PN.
+        The P/1P identifiers both map to the MPN for Mouser.
         """
         result = {'supplier': 'mouser'}
 
@@ -387,18 +409,38 @@ class BarcodeParser:
         if order_number := barcode_fields.get('customer_order_number'):
             barcode_fields.setdefault('supplier_order_number', order_number)
 
-        # Extract normalized fields
+        # Mouser remap: `P` (supplier_part_number in ECIA) is actually the MPN.
+        # Re-extract MPN per-field to handle values that contain pseudo-identifiers
+        # (e.g. `P67C18-8-M-P` or `PKTSC-21R`).
+        mpn = ''
+        for field in fields:
+            text = re.sub(r'^[\x1d\x1e]+|[\x1d\x1e]+$', '', str(field or '').strip())
+            if re.match(r'1?P', text):
+                candidate = BarcodeParser._extract_mouser_mpn(text)
+                if not candidate:
+                    # Delimiter-split field: whole remainder after 1P/P is the MPN.
+                    candidate = re.sub(r'^1?P', '', text)
+                if candidate:
+                    mpn = candidate
+                    break
+        if not mpn:
+            mpn = (
+                barcode_fields.get('manufacturer_part_number', '')
+                or barcode_fields.get('supplier_part_number', '')
+            )
+
         result.update(barcode_fields)
 
         normalized = {
             'supplier': 'mouser',
-            'barcode': result.get('manufacturer_part_number', ''),
+            'barcode': mpn,
             'supplier_pn': '',  # Mouser QR does NOT include supplier PN
-            'manufacturer_pn': result.get('manufacturer_part_number', ''),
+            'manufacturer_pn': mpn,
             'quantity': int(result.get('quantity', 0)) if result.get('quantity') else 0,
             'order_number': result.get('supplier_order_number', '') or result.get('customer_order_number', ''),
             'supplier_order_number': result.get('supplier_order_number', ''),
             'customer_order_number': result.get('customer_order_number', ''),
+            'manufacturer': result.get('manufacturer', ''),
             'raw_data': result
         }
 
@@ -406,44 +448,44 @@ class BarcodeParser:
 
     @staticmethod
     def _parse_mouser_fallback(barcode: str) -> Dict:
-        """Fallback regex-based parser for Mouser if ISO/IEC 15434 parsing fails.
+        """Fallback parser for Mouser when delimiters are absent.
 
-        This provides robustness against non-standard barcode formats.
+        Uses strong downstream terminators to extract the MPN, which can begin
+        with letters (e.g. ``KTSC-21R``) that the generic ECIA walker would
+        misread as new ``K`` identifiers.
         """
         result = {'supplier': 'mouser'}
 
         # Remove GS1 prefix
         data = barcode[5:] if barcode.startswith('[)>06') else barcode
 
-        barcode_fields = BarcodeParser.parse_ecia_fields([data])
-        order_number = (
-            barcode_fields.get('supplier_order_number')
-            or barcode_fields.get('customer_order_number')
-            or ''
-        )
+        mpn = BarcodeParser._extract_mouser_mpn(data)
+        manufacturer = BarcodeParser._extract_mouser_manufacturer(data)
 
-        result.update(barcode_fields)
+        # Order number: leading K<digits> before the next 14K / 4K / 1K / P boundary.
+        order_match = re.search(r'^K(\d+?)(?=(?:14K|4K|1K|1?P|$))', data)
+        order_number = order_match.group(1) if order_match else ''
 
-        # Manufacturer PN: preserve terminal '-P' before next ECIA token.
-        mfn_match = re.search(r'1?P([A-Z0-9\-]+?-P)(?=(?:30P|1K|10K|11K|4L|1V|Q|$))', data)
-        if mfn_match:
-            result['manufacturer_part_number'] = mfn_match.group(1)
+        quantity = BarcodeParser._extract_compact_quantity(data)
 
-        result['quantity'] = BarcodeParser._extract_compact_quantity(data)
+        result['manufacturer_part_number'] = mpn
+        result['manufacturer'] = manufacturer
+        result['quantity'] = quantity
         if order_number:
             result['customer_order_number'] = order_number
             result['supplier_order_number'] = order_number
 
         normalized = {
             'supplier': 'mouser',
-            'barcode': result.get('manufacturer_part_number', ''),
+            'barcode': mpn,
             'supplier_pn': '',
-            'manufacturer_pn': result.get('manufacturer_part_number', ''),
-            'quantity': int(result.get('quantity', 0)) if result.get('quantity') else 0,
+            'manufacturer_pn': mpn,
+            'quantity': int(quantity) if quantity else 0,
             'order_number': order_number,
-            'supplier_order_number': result.get('supplier_order_number', ''),
-            'customer_order_number': result.get('customer_order_number', ''),
-            'raw_data': result
+            'supplier_order_number': order_number,
+            'customer_order_number': order_number,
+            'manufacturer': manufacturer,
+            'raw_data': result,
         }
 
         return normalized
@@ -583,6 +625,7 @@ def main() -> None:
     """
     test_barcodes = [
         ("Mouser", "[)>06K3828825514K0011P67C18-8-M-PQ511K0895610514LUS1VGrayhill"),
+        ("Mouser (P-only MPN)", "[)>06K3878883614K0011PKTSC-21RQ10011K0896618144LVN1VDiptronics"),
         ("Digi-Key", "[)>06PGH7880-ND1P67C18-8-M-P30PGH7880-NDK1K9818346510K1228880039D25491T000043333911K14LUSQ1511Z"),
         ("LCSC", "{pbn:PICK2603230135,on:WM2603240072,pc:C2922211,pm:DB2EKN-3.5-3P-GN,qty:65,mc:,cc:1,pdi:204696597,hp:null,wc:ZH}"),
         ("TME (reference)", "PN:M3X10/D7985B CPO:12345 PO:33388984 MPN:M3X10/D7985B QTY:100"),
