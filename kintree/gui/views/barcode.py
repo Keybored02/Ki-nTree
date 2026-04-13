@@ -111,6 +111,22 @@ class BarcodeScannedRow:
         self.order_number = order_number
         self.supplier_order_reference = order_number
 
+        # User-edited overrides (None = use parsed value)
+        self._edited_quantity: Optional[int] = None
+        self._edited_order_number: Optional[str] = None
+
+    @property
+    def effective_quantity(self) -> int:
+        if self._edited_quantity is not None:
+            return self._edited_quantity
+        return int(self.quantity or 1)
+
+    @property
+    def effective_order_number(self) -> str:
+        if self._edited_order_number is not None:
+            return self._edited_order_number
+        return str(self.order_number or '')
+
 
 class ExistingPartScanRow:
     """Data row for existing-part assignment workflow."""
@@ -1836,7 +1852,37 @@ class BarcodeImportView(MainView):
                 barcode_text = self._truncate_text(barcode_display, max_len=90)
             else:
                 barcode_text = ''
-            qty_text = str(row.quantity) if row.supplier != 'unknown' else ''
+            # Quantity cell: editable for known suppliers
+            if row.supplier != 'unknown':
+                qty_cell_content = ft.TextField(
+                    value=str(row._edited_quantity if row._edited_quantity is not None else (row.quantity or 1)),
+                    width=60,
+                    dense=True,
+                    keyboard_type=ft.KeyboardType.NUMBER,
+                    text_size=12,
+                    content_padding=ft.padding.symmetric(horizontal=4, vertical=2),
+                    on_change=lambda e, i=idx: self._set_row_quantity(i, e.control.value),
+                )
+            else:
+                qty_cell_content = ft.Text('', size=12)
+
+            # Order number cell: editable for known suppliers only
+            if row.supplier != 'unknown':
+                order_display = row._edited_order_number if row._edited_order_number is not None else (row.order_number or '')
+                order_cell_content = ft.TextField(
+                    value=order_display,
+                    width=120,
+                    dense=True,
+                    text_size=12,
+                    content_padding=ft.padding.symmetric(horizontal=4, vertical=2),
+                    on_change=lambda e, i=idx: self._set_row_order_number(i, e.control.value),
+                )
+            else:
+                order_cell_content = ft.Text(
+                    self._truncate_text(str(row.order_number or ''), max_len=20),
+                    size=12, no_wrap=True,
+                )
+
             part_text = self._truncate_text(part_text, max_len=100)
             status_text = self._truncate_text(status_text, max_len=45)
             status_lower = status_text.lower()
@@ -1876,12 +1922,12 @@ class BarcodeImportView(MainView):
                 cells=[
                     ft.DataCell(ft.Text(input_code, size=12, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
                     ft.DataCell(ft.Text(row.supplier.upper(), size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)),
-                    ft.DataCell(ft.Text(getattr(row, 'order_number', '') or getattr(row, 'supplier_order_reference', ''), size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)),
+                    ft.DataCell(order_cell_content),
                     ft.DataCell(ft.Text(status_text, size=12, color=status_color, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
                     ft.DataCell(ft.Text(part_text, size=12, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
                     ft.DataCell(ft.Text(location_text, size=12, no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
                     ft.DataCell(ft.Text(barcode_text, size=11, color='gray', no_wrap=False, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
-                    ft.DataCell(ft.Text(qty_text, size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)),
+                    ft.DataCell(qty_cell_content),
                     ft.DataCell(category_cell_content),
                     ft.DataCell(ft.Checkbox(
                         value=row.create_stock,
@@ -2540,6 +2586,25 @@ class BarcodeImportView(MainView):
             self._update_results_table()
         self.focus_barcode_input()
 
+    def _set_row_quantity(self, idx: int, value: str):
+        """Store user-edited quantity for a row. Reverts to parsed value when field is cleared."""
+        if 0 <= idx < len(self.scanned_rows):
+            text = str(value or '').strip()
+            if not text:
+                self.scanned_rows[idx]._edited_quantity = None
+                return
+            try:
+                qty = int(text)
+                if qty > 0:
+                    self.scanned_rows[idx]._edited_quantity = qty
+            except (ValueError, TypeError):
+                pass
+
+    def _set_row_order_number(self, idx: int, value: str):
+        """Store user-edited order number for a row."""
+        if 0 <= idx < len(self.scanned_rows):
+            self.scanned_rows[idx]._edited_order_number = str(value or '').strip()
+
     def _refresh_import_button_state(self):
         """Enable Import All only when every row has a category assigned."""
         btn = self.fields.get('barcode_submit')
@@ -2792,8 +2857,8 @@ class BarcodeImportView(MainView):
                 'supplier_part_pk': 0,
                 'existing_part': False,
                 'po_supplier_key': str(row.supplier or '').strip().lower(),
-                'po_reference': str(getattr(row, 'supplier_order_reference', '') or '').strip(),
-                'po_quantity': max(1, int(row.quantity or 1)),
+                'po_reference': row.effective_order_number,
+                'po_quantity': max(1, row.effective_quantity),
             }
 
             try:
@@ -2931,7 +2996,7 @@ class BarcodeImportView(MainView):
 
                         stock_payload = {
                             'location': location_pk,
-                            'quantity': row.quantity or 1,
+                            'quantity': row.effective_quantity,
                             'make_default': False,
                         }
 
