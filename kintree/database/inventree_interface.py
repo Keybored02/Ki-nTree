@@ -663,6 +663,14 @@ def inventree_link_part_barcode(part_pk: int, barcode: str) -> bool:
     return inventree_api.link_barcode(barcode=barcode, part_pk=part_pk)
 
 
+def inventree_link_supplier_part_barcode(part_pk: int, supplier_sku: str, barcode: str) -> bool:
+    """Assign barcode to the supplier part matching part_pk + SKU."""
+    sp_pk = inventree_api.get_supplier_part_pk(part_pk=part_pk, supplier_sku=supplier_sku)
+    if sp_pk <= 0:
+        return False
+    return inventree_api.link_barcode(barcode=barcode, supplierpart_pk=sp_pk)
+
+
 def inventree_create(part_info: dict, stock=None, kicad=False, symbol=None, footprint=None, show_progress=True, is_custom=False, enable_upload=True):
     ''' Create InvenTree part from supplier part data and categories '''
 

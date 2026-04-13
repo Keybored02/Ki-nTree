@@ -832,7 +832,43 @@ def set_part_default_location(part_pk: int, location_pk: int):
     })
 
 
-def link_barcode(barcode: str, part_pk: int = None, stocklocation_pk: int = None) -> bool:
+def get_supplier_part_pk(part_pk: int, supplier_sku: str) -> int:
+    """Return the PK of a supplier part matching part_pk and SKU, or 0 if not found."""
+    global inventree_api
+
+    if not part_pk or not supplier_sku:
+        return 0
+
+    token = getattr(inventree_api, 'token', None)
+    base_url = getattr(inventree_api, 'base_url', '')
+    if not token or not base_url:
+        return 0
+
+    try:
+        headers = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+        response = requests.get(
+            f"{base_url.rstrip('/')}/api/company/part/",
+            headers=headers,
+            params={'part': int(part_pk), 'search': supplier_sku, 'limit': 50},
+            timeout=20,
+        )
+        if response.status_code != 200:
+            return 0
+        data = response.json()
+        items = data.get('results', data) if isinstance(data, dict) else data
+        sku_lower = str(supplier_sku).strip().lower()
+        for item in (items or []):
+            if str(item.get('SKU') or '').strip().lower() == sku_lower:
+                return int(item.get('pk') or item.get('id') or 0)
+    except Exception:
+        pass
+    return 0
+
+
+def link_barcode(barcode: str, part_pk: int = None, stocklocation_pk: int = None, supplierpart_pk: int = None) -> bool:
     """Link a barcode to an InvenTree object via /api/barcode/link/."""
     global inventree_api
 
@@ -847,6 +883,8 @@ def link_barcode(barcode: str, part_pk: int = None, stocklocation_pk: int = None
         payload['part'] = int(part_pk)
     if stocklocation_pk:
         payload['stocklocation'] = int(stocklocation_pk)
+    if supplierpart_pk:
+        payload['supplierpart'] = int(supplierpart_pk)
 
     if len(payload.keys()) == 1:
         cprint('[TREE]\tWarning: No barcode target provided', silent=settings.SILENT)

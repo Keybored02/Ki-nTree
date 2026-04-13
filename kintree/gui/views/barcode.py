@@ -2933,6 +2933,19 @@ class BarcodeImportView(MainView):
                                         silent=False,
                                     )
 
+                    # Assign supplier PN as the supplier part barcode (if available).
+                    if use_manufacturer_barcode and row.supplier_pn and part_pk:
+                        try:
+                            ok = inventree_interface.inventree_link_supplier_part_barcode(
+                                part_pk=part_pk,
+                                supplier_sku=row.supplier_pn,
+                                barcode=row.supplier_pn,
+                            )
+                            if not ok:
+                                cprint(f'[WARN]\tSupplier part barcode assignment failed for {row.search_name} (sku={row.supplier_pn})', silent=False)
+                        except Exception as exc:
+                            cprint(f'[WARN]\tSupplier part barcode error for {row.search_name}: {str(exc)[:60]}', silent=False)
+
                     result['ok'] = True
                     result['part_pk'] = int(part_pk)
                     result['existing_part'] = True
@@ -3042,6 +3055,19 @@ class BarcodeImportView(MainView):
                         inventree_interface.inventree_api.link_barcode(barcode_value, part_pk=part_pk)
                     except Exception as exc:
                         cprint(f'[WARN]\tBarcode linking failed for {row.search_name}: {str(exc)}', silent=False)
+
+                # Assign supplier PN as the supplier part barcode (if available).
+                if use_manufacturer_barcode and row.supplier_pn and part_pk:
+                    try:
+                        ok = inventree_interface.inventree_link_supplier_part_barcode(
+                            part_pk=part_pk,
+                            supplier_sku=row.supplier_pn,
+                            barcode=row.supplier_pn,
+                        )
+                        if not ok:
+                            cprint(f'[WARN]\tSupplier part barcode assignment failed for {row.search_name} (sku={row.supplier_pn})', silent=False)
+                    except Exception as exc:
+                        cprint(f'[WARN]\tSupplier part barcode error for {row.search_name}: {str(exc)[:60]}', silent=False)
 
                 result['ok'] = True
                 result['part_pk'] = int(part_pk)
