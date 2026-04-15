@@ -184,6 +184,14 @@ def connect(server: str,
     return False
 
 
+def get_inventree_api():
+    ''' Return the live InvenTreeAPI object, or None if not connected '''
+    api = globals().get('inventree_api')
+    if api and getattr(api, 'token', None):
+        return api
+    return None
+
+
 def set_inventree_db_test_mode():
     ''' InvenTree test database setup '''
     global inventree_api
