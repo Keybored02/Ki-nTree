@@ -67,6 +67,10 @@ MAIN_NAVIGATION = {
         'nav_index': 5,
         'route': '/main/locations'
     },
+    'Pickup': {
+        'nav_index': 6,
+        'route': '/main/pickup'
+    },
 }
 
 # Load navigation indexes
@@ -116,6 +120,12 @@ main_navrail = ft.NavigationRail(
             icon_content=ft.Icon(name=ft.icons.EDIT_LOCATION_ALT_OUTLINED, size=40),
             selected_icon_content=ft.Icon(name=ft.icons.EDIT_LOCATION_ALT, size=40),
             label_content=ft.Text("Locations", size=16),
+            padding=10,
+        ),
+        ft.NavigationRailDestination(
+            icon_content=ft.Icon(name=ft.icons.SHOPPING_BASKET_OUTLINED, size=40),
+            selected_icon_content=ft.Icon(name=ft.icons.SHOPPING_BASKET, size=40),
+            label_content=ft.Text("Pickup", size=16),
             padding=10,
         ),
     ],

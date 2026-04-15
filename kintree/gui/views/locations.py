@@ -11,12 +11,12 @@ import requests
 from ...common.tools import cprint
 from ...database import inventree_interface
 from ...search.barcode_parser import BarcodeParser
-from .barcode import ExistingPartScanRow, _BarcodeApiHelpers
+from .barcode import BarcodeApiMixin, ExistingPartScanRow
 from .common import DialogType, DropdownWithSearch, GUI_PARAMS
 from .main import MainView
 
 
-class LocationsView(MainView):
+class LocationsView(BarcodeApiMixin, MainView):
     """Manage stock location hierarchy and move items to locations."""
 
     title = 'Locations'
@@ -484,7 +484,7 @@ class LocationsView(MainView):
             row.status = 'Checking part...'
             self._update_results_table_throttled()
 
-            part = _BarcodeApiHelpers.find_part_by_lookup(self, row.lookup_value)
+            part = self._find_part_by_lookup(row.lookup_value)
             if not part:
                 row.status = 'Part not found'
                 self._update_results_table_throttled(force=True)
@@ -497,7 +497,7 @@ class LocationsView(MainView):
             except Exception:
                 row.default_location_pk = 0
 
-            row.location = _BarcodeApiHelpers.resolve_location_string(part)
+            row.location = self._resolve_location_string(part)
 
             has_location = bool(row.location and row.location not in ('-', 'None', 'none'))
             row.status = 'Ready' if has_location else 'Missing location'

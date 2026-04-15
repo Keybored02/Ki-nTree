@@ -1291,6 +1291,10 @@ class _BarcodeApiHelpers:
         return False
 
 
+# Public alias used by locations.py and other importers.
+BarcodeApiMixin = _BarcodeApiHelpers
+
+
 class BarcodeImportView(MainView):
     """Barcode scanner and import view for Ki-nTree.
 

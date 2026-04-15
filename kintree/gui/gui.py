@@ -12,6 +12,7 @@ from .views.main import (
 )
 from .views.barcode import BarcodeImportView
 from .views.locations import LocationsView
+from .views.pickup import PickupView
 from .views.settings import (
     UserSettingsView,
     SupplierSettingsView,
@@ -75,6 +76,7 @@ def kintree_gui(page: ft.Page):
         'create': None,
         'barcode': None,
         'locations': None,
+        'pickup': None,
     }
     settings_views = {
         'user': None,
@@ -96,6 +98,8 @@ def kintree_gui(page: ft.Page):
             main_views['barcode'] = BarcodeImportView(page)
         elif key == 'locations' and main_views['locations'] is None:
             main_views['locations'] = LocationsView(page)
+        elif key == 'pickup' and main_views['pickup'] is None:
+            main_views['pickup'] = PickupView(page)
         return main_views[key]
 
     def get_settings_view(key: str):
@@ -130,6 +134,8 @@ def kintree_gui(page: ft.Page):
                 page.views.append(get_main_view('barcode'))
             elif 'locations' in current_route:
                 page.views.append(get_main_view('locations'))
+            elif 'pickup' in current_route:
+                page.views.append(get_main_view('pickup'))
         elif '/settings' in current_route:
             if page.views and '/settings' in page.views[-1].route:
                 page.views.pop()
