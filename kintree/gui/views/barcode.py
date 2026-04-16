@@ -1479,6 +1479,12 @@ class BarcodeImportView(MainView):
             on_change=lambda _: self.focus_barcode_input(),
         )
 
+        self.fields['update_existing_metadata_check'] = ft.Checkbox(
+            label='Update name / MPN / SKU from label when part already exists',
+            value=True,
+            on_change=lambda _: self.focus_barcode_input(),
+        )
+
         self.fields['assign_all_stock_items_location_check'] = ft.Checkbox(
             label='Assign selected location to all stock items of the part',
             value=True,
@@ -1563,6 +1569,7 @@ class BarcodeImportView(MainView):
                             ft.Text('Barcode & Existing Part Options:', style=ft.TextThemeStyle.BODY_MEDIUM),
                             self.fields['use_manufacturer_barcode_check'],
                             self.fields['force_barcode_reassign_check'],
+                            self.fields['update_existing_metadata_check'],
                             
                             ft.Text('Stock Item Location:', style=ft.TextThemeStyle.BODY_MEDIUM),
                             self.fields['assign_all_stock_items_location_check'],
@@ -2716,6 +2723,232 @@ class BarcodeImportView(MainView):
     def _fetch_part_barcodes(self, part_pk: int) -> List[str]:
         return _BarcodeApiHelpers.fetch_part_barcodes(self, part_pk)
 
+    # ------------------------------------------------------------------ #
+    # Metadata reconciliation for known-supplier parts found in the DB    #
+    # ------------------------------------------------------------------ #
+    _KNOWN_SUPPLIERS = {'digikey', 'mouser', 'tme', 'lcsc'}
+
+    def _update_existing_part_metadata(
+        self,
+        part_pk: int,
+        row: 'BarcodeScannedRow',
+        existing_part: Dict,
+        use_manufacturer_barcode: bool,
+        force_barcode_reassign: bool,
+    ) -> None:
+        """Reconcile name / MPN / SKU / barcodes for an existing DB part.
+
+        Only runs for the four barcode-supported suppliers (Digi-Key, Mouser,
+        TME, LCSC).  All updates are best-effort — failures are logged but
+        never abort the import.
+        """
+        supplier_norm = str(row.supplier or '').strip().lower()
+        if supplier_norm not in self._KNOWN_SUPPLIERS:
+            return
+
+        api_obj = getattr(inventree_interface.inventree_api, 'inventree_api', None)
+        token = getattr(api_obj, 'token', None) if api_obj else None
+        base_url = getattr(api_obj, 'base_url', '') if api_obj else ''
+        if not token or not base_url:
+            return
+
+        headers_json = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+        headers_get = {
+            'Authorization': f'Token {token}',
+            'Accept': 'application/json',
+        }
+
+        # ---- 1. Part name ------------------------------------------------
+        db_name = str(existing_part.get('name') or '').strip()
+        new_name = str(row.manufacturer_pn or '').strip()
+        if new_name and db_name.lower() != new_name.lower():
+            try:
+                inventree_interface.inventree_api.update_part(part_pk, {'name': new_name})
+                cprint(f'[BARCODE]\tUpdated part name (MPN): "{db_name}" → "{new_name}" (pk={part_pk})', silent=False)
+            except Exception as exc:
+                cprint(f'[WARN]\tFailed to update part name for pk={part_pk}: {exc}', silent=False)
+
+        # ---- 2. Manufacturer part (MPN) ----------------------------------
+        new_mpn = str(row.manufacturer_pn or '').strip()
+        if new_mpn:
+            try:
+                resp = self._request_with_retries(
+                    method='GET',
+                    url=f"{base_url.rstrip('/')}/api/company/part/manufacturer/",
+                    headers=headers_get,
+                    params={'part': part_pk, 'limit': 50},
+                    timeout=20,
+                )
+                mfr_rows: List[Dict] = []
+                if resp is not None:
+                    payload = resp.json()
+                    mfr_rows = payload.get('results', payload) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
+
+                matched_mfr = None
+                for item in mfr_rows:
+                    if isinstance(item, dict):
+                        matched_mfr = item
+                        break  # take the first (usually only) manufacturer part
+
+                if matched_mfr:
+                    db_mpn = str(matched_mfr.get('MPN') or '').strip()
+                    if db_mpn.lower() != new_mpn.lower():
+                        mfr_pk = int(matched_mfr.get('pk') or matched_mfr.get('id') or 0)
+                        if mfr_pk:
+                            patch_resp = self._request_with_retries(
+                                method='PATCH',
+                                url=f"{base_url.rstrip('/')}/api/company/part/manufacturer/{mfr_pk}/",
+                                headers=headers_json,
+                                json={'MPN': new_mpn},
+                                timeout=20,
+                            )
+                            if patch_resp is not None and patch_resp.status_code in [200, 202]:
+                                cprint(f'[BARCODE]\tUpdated MPN: "{db_mpn}" → "{new_mpn}" (mfr_part_pk={mfr_pk})', silent=False)
+                            else:
+                                cprint(f'[WARN]\tFailed to update MPN for mfr_part_pk={mfr_pk}', silent=False)
+                else:
+                    # No manufacturer part exists — create one via inventree_create_manufacturer_part.
+                    try:
+                        inventree_interface.inventree_create_manufacturer_part(
+                            part_id=part_pk,
+                            manufacturer_name='',  # unknown from barcode alone
+                            manufacturer_mpn=new_mpn,
+                            datasheet='',
+                            description=str(existing_part.get('description') or ''),
+                        )
+                        cprint(f'[BARCODE]\tCreated manufacturer part MPN={new_mpn} for pk={part_pk}', silent=False)
+                    except Exception as exc:
+                        cprint(f'[WARN]\tCould not create manufacturer part for pk={part_pk}: {exc}', silent=False)
+            except Exception as exc:
+                cprint(f'[WARN]\tManufacturer part reconciliation error for pk={part_pk}: {exc}', silent=False)
+
+        # ---- 3. Supplier part (SKU) --------------------------------------
+        new_sku = str(row.supplier_pn or '').strip()
+        supplier_display = self._resolve_supplier_key(supplier_norm)
+        if new_sku and supplier_display:
+            try:
+                resp = self._request_with_retries(
+                    method='GET',
+                    url=f"{base_url.rstrip('/')}/api/company/part/",
+                    headers=headers_get,
+                    params={'part': part_pk, 'limit': 50},
+                    timeout=20,
+                )
+                all_sup_rows: List[Dict] = []
+                if resp is not None:
+                    payload = resp.json()
+                    all_sup_rows = payload.get('results', payload) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
+
+                # Collect ALL supplier parts belonging to this supplier company.
+                this_supplier_parts: List[Dict] = []
+                for item in all_sup_rows:
+                    if not isinstance(item, dict):
+                        continue
+                    sup_ref = item.get('supplier_name') or item.get('supplier') or ''
+                    if isinstance(sup_ref, dict):
+                        sup_name = str(sup_ref.get('name') or '').strip().lower()
+                    else:
+                        sup_name = str(sup_ref).strip().lower()
+                    if supplier_display.lower() in sup_name or sup_name in supplier_display.lower():
+                        this_supplier_parts.append(item)
+
+                if this_supplier_parts:
+                    new_sku_lower = new_sku.lower()
+
+                    # Check if any existing supplier part already has the correct SKU.
+                    exact_match = next(
+                        (item for item in this_supplier_parts
+                         if str(item.get('SKU') or '').strip().lower() == new_sku_lower),
+                        None,
+                    )
+
+                    if exact_match:
+                        # SKU is already correct on at least one record — nothing to do.
+                        pass
+                    elif len(this_supplier_parts) == 1:
+                        # Single supplier part: safe to update its SKU.
+                        target = this_supplier_parts[0]
+                        db_sku = str(target.get('SKU') or '').strip()
+                        sup_pk = int(target.get('pk') or target.get('id') or 0)
+                        if sup_pk:
+                            patch_resp = self._request_with_retries(
+                                method='PATCH',
+                                url=f"{base_url.rstrip('/')}/api/company/part/{sup_pk}/",
+                                headers=headers_json,
+                                json={'SKU': new_sku},
+                                timeout=20,
+                            )
+                            if patch_resp is not None and patch_resp.status_code in [200, 202]:
+                                cprint(f'[BARCODE]\tUpdated SKU: "{db_sku}" → "{new_sku}" (sup_part_pk={sup_pk})', silent=False)
+                            else:
+                                cprint(f'[WARN]\tFailed to update SKU for sup_part_pk={sup_pk}', silent=False)
+                    else:
+                        # Multiple supplier parts for this supplier — pick the best candidate:
+                        # prefer a partial SKU match, otherwise fall back to the first record.
+                        # Log the ambiguity so the user can review.
+                        skus = [str(item.get('SKU') or '') for item in this_supplier_parts]
+                        cprint(
+                            f'[BARCODE]\tMultiple {supplier_display} supplier parts for pk={part_pk} '
+                            f'(existing SKUs: {skus}); target SKU="{new_sku}" — picking closest match.',
+                            silent=False,
+                        )
+                        best = next(
+                            (item for item in this_supplier_parts
+                             if new_sku_lower in str(item.get('SKU') or '').strip().lower()
+                             or str(item.get('SKU') or '').strip().lower() in new_sku_lower),
+                            this_supplier_parts[0],
+                        )
+                        db_sku = str(best.get('SKU') or '').strip()
+                        sup_pk = int(best.get('pk') or best.get('id') or 0)
+                        if sup_pk and db_sku.lower() != new_sku_lower:
+                            patch_resp = self._request_with_retries(
+                                method='PATCH',
+                                url=f"{base_url.rstrip('/')}/api/company/part/{sup_pk}/",
+                                headers=headers_json,
+                                json={'SKU': new_sku},
+                                timeout=20,
+                            )
+                            if patch_resp is not None and patch_resp.status_code in [200, 202]:
+                                cprint(f'[BARCODE]\tUpdated SKU: "{db_sku}" → "{new_sku}" (sup_part_pk={sup_pk})', silent=False)
+                            else:
+                                cprint(f'[WARN]\tFailed to update SKU for sup_part_pk={sup_pk}', silent=False)
+                # If no supplier part exists at all, the import flow will create one via inventree_create.
+            except Exception as exc:
+                cprint(f'[WARN]\tSupplier part reconciliation error for pk={part_pk}: {exc}', silent=False)
+
+        # ---- 4. Barcodes -------------------------------------------------
+        if use_manufacturer_barcode:
+            barcode_target = str(row.manufacturer_pn or row.barcode or '').strip()
+            if barcode_target:
+                current_barcodes = self._fetch_part_barcodes(part_pk=part_pk)
+                current_normalized = {str(b or '').strip().lower() for b in current_barcodes if str(b or '').strip()}
+                if barcode_target.lower() not in current_normalized:
+                    for attempt in range(1, 4):
+                        try:
+                            ok = self._link_part_barcode(part_pk=part_pk, barcode_value=barcode_target)
+                            if ok:
+                                break
+                        except Exception as exc:
+                            cprint(f'[WARN]\tBarcode link retry {attempt} for pk={part_pk}: {exc}', silent=False)
+                        if attempt < 3:
+                            time.sleep(0.5)
+
+            if new_sku and part_pk:
+                try:
+                    ok = inventree_interface.inventree_link_supplier_part_barcode(
+                        part_pk=part_pk,
+                        supplier_sku=new_sku,
+                        barcode=new_sku,
+                    )
+                    if not ok:
+                        cprint(f'[WARN]\tSupplier part barcode assignment failed for pk={part_pk} sku={new_sku}', silent=False)
+                except Exception as exc:
+                    cprint(f'[WARN]\tSupplier part barcode error for pk={part_pk}: {exc}', silent=False)
+
     def _collect_transfer_items_for_part(self, part_pk: int, location_pk: int) -> tuple[List[Dict], str]:
         return _BarcodeApiHelpers.collect_transfer_items_for_part(self, part_pk, location_pk)
 
@@ -2831,6 +3064,7 @@ class BarcodeImportView(MainView):
         po_flow_enabled = bool(self.fields.get('po_flow_check').value)
         assign_all_stock_items_location = bool(self.fields.get('assign_all_stock_items_location_check').value) and not po_flow_enabled
         force_barcode_reassign = bool(self.fields.get('force_barcode_reassign_check').value)
+        update_existing_metadata = bool(self.fields.get('update_existing_metadata_check').value)
 
         selected_location_value = str(self.fields.get('location_select').value or '').strip()
         assign_location_existing = bool(selected_location_value)
@@ -2884,8 +3118,6 @@ class BarcodeImportView(MainView):
                         result['failure'] = f'{row.search_name}: Existing part has invalid PK'
                         return result
 
-                    _ = str(existing_part.get('name') or existing_part.get('IPN') or row.search_name or '').strip()
-
                     # Existing-part path: Assign workflow semantics.
                     if assign_location_existing and not po_flow_enabled:
                         set_ok = self._set_part_default_location(part_pk=part_pk, location_pk=selected_location_pk)
@@ -2893,66 +3125,15 @@ class BarcodeImportView(MainView):
                             result['failure'] = f'{row.search_name}: default location update failed'
                             return result
 
-                    barcode_target = ''
-                    if use_manufacturer_barcode:
-                        barcode_target = str(row.manufacturer_pn or row.barcode or '').strip()
-
-                    if barcode_target:
-                        current_barcodes = self._fetch_part_barcodes(part_pk=part_pk)
-                        current_barcodes_normalized = {
-                            str(value or '').strip().lower()
-                            for value in current_barcodes
-                            if str(value or '').strip()
-                        }
-                        if barcode_target.lower() in current_barcodes_normalized:
-                            pass
-                        elif current_barcodes and not force_barcode_reassign:
-                            pass
-                        else:
-                            barcode_ok = False
-                            for attempt in range(1, 4):
-                                try:
-                                    barcode_ok = self._link_part_barcode(part_pk=part_pk, barcode_value=barcode_target)
-                                    if barcode_ok:
-                                        break
-                                    elif attempt < 3:
-                                        time.sleep(0.5)
-                                except Exception as exc:
-                                    cprint(f'[WARN]\tBarcode link retry {attempt} failed for "{row.search_name}": {str(exc)[:60]}', silent=False)
-                                    if attempt < 3:
-                                        time.sleep(0.5)
-                            if not barcode_ok:
-                                # Re-fetch to check if the barcode is already assigned
-                                # (API may reject re-assignment of an identical value).
-                                recheck = self._fetch_part_barcodes(part_pk=part_pk)
-                                recheck_normalized = {
-                                    str(b or '').strip().lower()
-                                    for b in recheck
-                                    if str(b or '').strip()
-                                }
-                                if barcode_target.lower() in recheck_normalized:
-                                    cprint(
-                                        f'[INFO]\tBarcode already assigned to part {row.search_name} (barcode={barcode_target})',
-                                        silent=False,
-                                    )
-                                else:
-                                    cprint(
-                                        f'[WARN]\tBarcode reassignment failed for existing part {row.search_name} (barcode={barcode_target}) after retries',
-                                        silent=False,
-                                    )
-
-                    # Assign supplier PN as the supplier part barcode (if available).
-                    if use_manufacturer_barcode and row.supplier_pn and part_pk:
-                        try:
-                            ok = inventree_interface.inventree_link_supplier_part_barcode(
-                                part_pk=part_pk,
-                                supplier_sku=row.supplier_pn,
-                                barcode=row.supplier_pn,
-                            )
-                            if not ok:
-                                cprint(f'[WARN]\tSupplier part barcode assignment failed for {row.search_name} (sku={row.supplier_pn})', silent=False)
-                        except Exception as exc:
-                            cprint(f'[WARN]\tSupplier part barcode error for {row.search_name}: {str(exc)[:60]}', silent=False)
+                    # Reconcile name / MPN / SKU / barcodes from the scanned label.
+                    if update_existing_metadata:
+                        self._update_existing_part_metadata(
+                            part_pk=part_pk,
+                            row=row,
+                            existing_part=existing_part,
+                            use_manufacturer_barcode=use_manufacturer_barcode,
+                            force_barcode_reassign=force_barcode_reassign,
+                        )
 
                     result['ok'] = True
                     result['part_pk'] = int(part_pk)
