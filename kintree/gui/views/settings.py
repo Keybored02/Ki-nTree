@@ -181,6 +181,11 @@ SETTINGS = {
             ft.Switch(),
             False,  # Browse enabled
         ],
+        'Compact Layout (embed InvenTree / KiCad / Create in Part Search)': [
+            'COMPACT_LAYOUT',
+            ft.Switch(),
+            False,
+        ],
         'Enable Supplier Search Cache': [
             'CACHE_ENABLED',
             SwitchWithRefs(),
@@ -577,6 +582,9 @@ class UserSettingsView(PathSettingsView):
             'CACHE_ENABLED': global_settings.CACHE_ENABLED,
             'CACHE_VALID_DAYS': global_settings.CACHE_VALID_DAYS
         },
+        **{
+            'COMPACT_LAYOUT': global_settings.COMPACT_LAYOUT,
+        },
     }
     settings_file_list = [
         global_settings.USER_CONFIG_FILE,
@@ -585,6 +593,17 @@ class UserSettingsView(PathSettingsView):
     ]
 
     def save(self):
+        # Ensure keys not originally in general.yaml are written before the
+        # generic save loop (which only updates existing keys).
+        _general = config_interface.load_file(global_settings.CONFIG_GENERAL_PATH) or {}
+        _new_keys = {
+            'COMPACT_LAYOUT': SETTINGS[self.title]['Compact Layout (embed InvenTree / KiCad / Create in Part Search)'][1].value,
+        }
+        _changed = {k: v for k, v in _new_keys.items() if k not in _general}
+        if _changed:
+            config_interface.dump_file({**_general, **_changed}, global_settings.CONFIG_GENERAL_PATH)
+        # Also update the in-memory value so the current session reacts
+        global_settings.COMPACT_LAYOUT = bool(_new_keys['COMPACT_LAYOUT'])
         # Save all settings
         for sf in self.settings_file_list:
             super().save(settings_file=sf, show_dialog=True)
@@ -628,7 +647,7 @@ class UserSettingsView(PathSettingsView):
         SETTINGS[self.title]['Enable Supplier Search Cache'][1].refs = [cache_row_ref]
 
         for name, field in SETTINGS[self.title].items():
-            if field[0] in ['AUTOMATIC_BROWSER_OPEN', 'DATASHEET_SAVE_ENABLED', 'DATASHEET_SAVE_PATH', 'DATASHEET_INVENTREE_ENABLED']:
+            if field[0] in ['AUTOMATIC_BROWSER_OPEN', 'DATASHEET_SAVE_ENABLED', 'DATASHEET_SAVE_PATH', 'DATASHEET_INVENTREE_ENABLED', 'COMPACT_LAYOUT']:
                 self.fields[name].on_change = lambda _: self.save()
             elif field[0] in ['CACHE_ENABLED', 'CACHE_VALID_DAYS']:
                 self.fields[name].on_change = lambda _: self.save()

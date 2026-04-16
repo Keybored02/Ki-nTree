@@ -1400,7 +1400,7 @@ class BarcodeImportView(MainView):
                 ft.DataColumn(ft.Text('Supplier')),
                 ft.DataColumn(ft.Text('Order Number')),
                 ft.DataColumn(ft.Text('Status')),
-                ft.DataColumn(ft.Text('Part')),
+                ft.DataColumn(ft.Text('Supplier PN')),
                 ft.DataColumn(ft.Text('Location')),
                 ft.DataColumn(ft.Text('Barcode')),
                 ft.DataColumn(ft.Text('Qty')),
@@ -1860,7 +1860,7 @@ class BarcodeImportView(MainView):
             if row.supplier != 'unknown':
                 qty_cell_content = ft.TextField(
                     value=str(row._edited_quantity if row._edited_quantity is not None else (row.quantity or 1)),
-                    width=60,
+                    width=80,
                     dense=True,
                     keyboard_type=ft.KeyboardType.NUMBER,
                     text_size=12,
@@ -2310,7 +2310,11 @@ class BarcodeImportView(MainView):
                 if response is None:
                     continue
 
-                payload = response.json()
+                try:
+                    payload = response.json()
+                except Exception:
+                    continue
+
                 if isinstance(payload, dict):
                     rows = payload.get('results') or []
                 elif isinstance(payload, list):

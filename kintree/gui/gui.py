@@ -48,11 +48,13 @@ def init_gui(page: ft.Page):
     page.window.title_bar_hidden = False
     page.window.maximizable = True
     page.window.resizable = True
-    page.window.maximized = True
+    # Start hidden so the window is fully composed before it appears, avoiding
+    # the intermittent half-rendered / black-box artifact on Windows startup.
+    page.window.visible = False
 
     # Reflow when the window is resized / restored.
     page.on_resize = lambda e: _stabilize_layout(page)
-    
+
     # Theme
     update_theme(page)
 
@@ -63,6 +65,11 @@ def init_gui(page: ft.Page):
     # Update
     page.update()
     _stabilize_layout(page)
+
+    # Now show the window maximized — all controls are already laid out.
+    page.window.maximized = True
+    page.window.visible = True
+    page.update()
 
 
 def kintree_gui(page: ft.Page):
@@ -124,11 +131,11 @@ def kintree_gui(page: ft.Page):
             page.views.clear()
             if 'part' in current_route or current_route == '/':
                 page.views.append(get_main_view('part'))
-            if 'inventree' in current_route:
+            elif not settings.COMPACT_LAYOUT and 'inventree' in current_route:
                 page.views.append(get_main_view('inventree'))
-            elif 'kicad' in current_route:
+            elif not settings.COMPACT_LAYOUT and 'kicad' in current_route:
                 page.views.append(get_main_view('kicad'))
-            elif 'create' in current_route:
+            elif not settings.COMPACT_LAYOUT and 'create' in current_route:
                 page.views.append(get_main_view('create'))
             elif 'barcode' in current_route:
                 page.views.append(get_main_view('barcode'))

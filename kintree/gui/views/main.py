@@ -42,95 +42,113 @@ main_appbar = ft.AppBar(
 )
 
 # Navigation Controls
-MAIN_NAVIGATION = {
-    'Part Search': {
-        'nav_index': 0,
-        'route': '/main/part'
-    },
-    'InvenTree': {
-        'nav_index': 1,
-        'route': '/main/inventree'
-    },
-    'KiCad': {
-        'nav_index': 2,
-        'route': '/main/kicad'
-    },
-    'Create': {
-        'nav_index': 3,
-        'route': '/main/create'
-    },
-    'Barcode': {
-        'nav_index': 4,
-        'route': '/main/barcode'
-    },
-    'Locations': {
-        'nav_index': 5,
-        'route': '/main/locations'
-    },
-    'Pickup': {
-        'nav_index': 6,
-        'route': '/main/pickup'
-    },
-}
+# When COMPACT_LAYOUT is True, InvenTree / KiCad / Create are embedded inside
+# PartSearchView and use nav_index=None (hidden from the sidebar).
+# When False they get their own sidebar entries and routes (classic layout).
 
-# Load navigation indexes
-NAV_BAR_INDEX = {}
-for view in MAIN_NAVIGATION.values():
-    NAV_BAR_INDEX[view['nav_index']] = view['route']
+def _build_navigation():
+    """Return (MAIN_NAVIGATION dict, NAV_BAR_INDEX dict, NavigationRail)
+    appropriate for the current COMPACT_LAYOUT setting."""
+    compact = settings.COMPACT_LAYOUT
 
-# Main NavRail
-main_navrail = ft.NavigationRail(
-    selected_index=0,
-    label_type=ft.NavigationRailLabelType.ALL,
-    min_width=100,
-    min_extended_width=400,
-    group_alignment=-0.9,
-    destinations=[
-        ft.NavigationRailDestination(
-            icon_content=ft.Icon(name=ft.icons.SCREEN_SEARCH_DESKTOP_OUTLINED, size=40),
-            selected_icon_content=ft.Icon(name=ft.icons.SCREEN_SEARCH_DESKTOP_SHARP, size=40),
-            label_content=ft.Text("Part Search", size=16),
-            padding=10,
-        ),
-        ft.NavigationRailDestination(
-            icon_content=ft.Icon(name=ft.icons.INVENTORY_2_OUTLINED, size=40),
-            selected_icon_content=ft.Icon(name=ft.icons.INVENTORY_2, size=40),
-            label_content=ft.Text("InvenTree", size=16),
-            padding=10,
-        ),
-        ft.NavigationRailDestination(
-            icon_content=ft.Icon(name=ft.icons.SETTINGS_INPUT_COMPONENT_OUTLINED, size=40),
-            selected_icon_content=ft.Icon(name=ft.icons.SETTINGS_INPUT_COMPONENT, size=40),
-            label_content=ft.Text("KiCad", size=16),
-            padding=10,
-        ),
-        ft.NavigationRailDestination(
-            icon_content=ft.Icon(name=ft.icons.BUILD_OUTLINED, size=40),
-            selected_icon_content=ft.Icon(name=ft.icons.BUILD, size=40),
-            label_content=ft.Text("Create", size=16),
-            padding=10,
-        ),
-        ft.NavigationRailDestination(
-            icon_content=ft.Icon(name=ft.icons.QR_CODE_2_OUTLINED, size=40),
-            selected_icon_content=ft.Icon(name=ft.icons.QR_CODE_2, size=40),
-            label_content=ft.Text("Barcode", size=16),
-            padding=10,
-        ),
-        ft.NavigationRailDestination(
-            icon_content=ft.Icon(name=ft.icons.EDIT_LOCATION_ALT_OUTLINED, size=40),
-            selected_icon_content=ft.Icon(name=ft.icons.EDIT_LOCATION_ALT, size=40),
-            label_content=ft.Text("Locations", size=16),
-            padding=10,
-        ),
-        ft.NavigationRailDestination(
-            icon_content=ft.Icon(name=ft.icons.SHOPPING_BASKET_OUTLINED, size=40),
-            selected_icon_content=ft.Icon(name=ft.icons.SHOPPING_BASKET, size=40),
-            label_content=ft.Text("Pickup", size=16),
-            padding=10,
-        ),
-    ],
-    on_change=None,
-)
+    if compact:
+        nav = {
+            'Part Search': {'nav_index': 0, 'route': '/main/part'},
+            'InvenTree':   {'nav_index': None, 'route': '/main/inventree'},
+            'KiCad':       {'nav_index': None, 'route': '/main/kicad'},
+            'Create':      {'nav_index': None, 'route': '/main/create'},
+            'Barcode':     {'nav_index': 1, 'route': '/main/barcode'},
+            'Locations':   {'nav_index': 2, 'route': '/main/locations'},
+            'Pickup':      {'nav_index': 3, 'route': '/main/pickup'},
+        }
+        destinations = [
+            ft.NavigationRailDestination(
+                icon_content=ft.Icon(name=ft.icons.SCREEN_SEARCH_DESKTOP_OUTLINED, size=40),
+                selected_icon_content=ft.Icon(name=ft.icons.SCREEN_SEARCH_DESKTOP_SHARP, size=40),
+                label_content=ft.Text("Part Search", size=16), padding=10,
+            ),
+            ft.NavigationRailDestination(
+                icon_content=ft.Icon(name=ft.icons.QR_CODE_2_OUTLINED, size=40),
+                selected_icon_content=ft.Icon(name=ft.icons.QR_CODE_2, size=40),
+                label_content=ft.Text("Barcode", size=16), padding=10,
+            ),
+            ft.NavigationRailDestination(
+                icon_content=ft.Icon(name=ft.icons.EDIT_LOCATION_ALT_OUTLINED, size=40),
+                selected_icon_content=ft.Icon(name=ft.icons.EDIT_LOCATION_ALT, size=40),
+                label_content=ft.Text("Locations", size=16), padding=10,
+            ),
+            ft.NavigationRailDestination(
+                icon_content=ft.Icon(name=ft.icons.SHOPPING_BASKET_OUTLINED, size=40),
+                selected_icon_content=ft.Icon(name=ft.icons.SHOPPING_BASKET, size=40),
+                label_content=ft.Text("Pickup", size=16), padding=10,
+            ),
+        ]
+    else:
+        nav = {
+            'Part Search': {'nav_index': 0, 'route': '/main/part'},
+            'InvenTree':   {'nav_index': 1, 'route': '/main/inventree'},
+            'KiCad':       {'nav_index': 2, 'route': '/main/kicad'},
+            'Create':      {'nav_index': 3, 'route': '/main/create'},
+            'Barcode':     {'nav_index': 4, 'route': '/main/barcode'},
+            'Locations':   {'nav_index': 5, 'route': '/main/locations'},
+            'Pickup':      {'nav_index': 6, 'route': '/main/pickup'},
+        }
+        destinations = [
+            ft.NavigationRailDestination(
+                icon_content=ft.Icon(name=ft.icons.SCREEN_SEARCH_DESKTOP_OUTLINED, size=40),
+                selected_icon_content=ft.Icon(name=ft.icons.SCREEN_SEARCH_DESKTOP_SHARP, size=40),
+                label_content=ft.Text("Part Search", size=16), padding=10,
+            ),
+            ft.NavigationRailDestination(
+                icon_content=ft.Icon(name=ft.icons.INVENTORY_2_OUTLINED, size=40),
+                selected_icon_content=ft.Icon(name=ft.icons.INVENTORY_2, size=40),
+                label_content=ft.Text("InvenTree", size=16), padding=10,
+            ),
+            ft.NavigationRailDestination(
+                icon_content=ft.Icon(name=ft.icons.SETTINGS_INPUT_COMPONENT_OUTLINED, size=40),
+                selected_icon_content=ft.Icon(name=ft.icons.SETTINGS_INPUT_COMPONENT, size=40),
+                label_content=ft.Text("KiCad", size=16), padding=10,
+            ),
+            ft.NavigationRailDestination(
+                icon_content=ft.Icon(name=ft.icons.BUILD_OUTLINED, size=40),
+                selected_icon_content=ft.Icon(name=ft.icons.BUILD, size=40),
+                label_content=ft.Text("Create", size=16), padding=10,
+            ),
+            ft.NavigationRailDestination(
+                icon_content=ft.Icon(name=ft.icons.QR_CODE_2_OUTLINED, size=40),
+                selected_icon_content=ft.Icon(name=ft.icons.QR_CODE_2, size=40),
+                label_content=ft.Text("Barcode", size=16), padding=10,
+            ),
+            ft.NavigationRailDestination(
+                icon_content=ft.Icon(name=ft.icons.EDIT_LOCATION_ALT_OUTLINED, size=40),
+                selected_icon_content=ft.Icon(name=ft.icons.EDIT_LOCATION_ALT, size=40),
+                label_content=ft.Text("Locations", size=16), padding=10,
+            ),
+            ft.NavigationRailDestination(
+                icon_content=ft.Icon(name=ft.icons.SHOPPING_BASKET_OUTLINED, size=40),
+                selected_icon_content=ft.Icon(name=ft.icons.SHOPPING_BASKET, size=40),
+                label_content=ft.Text("Pickup", size=16), padding=10,
+            ),
+        ]
+
+    nav_bar_index = {
+        v['nav_index']: v['route']
+        for v in nav.values()
+        if v['nav_index'] is not None
+    }
+    rail = ft.NavigationRail(
+        selected_index=0,
+        label_type=ft.NavigationRailLabelType.ALL,
+        min_width=100,
+        min_extended_width=400,
+        group_alignment=-0.9,
+        destinations=destinations,
+        on_change=None,
+    )
+    return nav, nav_bar_index, rail
+
+
+MAIN_NAVIGATION, NAV_BAR_INDEX, main_navrail = _build_navigation()
 
 
 class MainView(CommonView):
@@ -227,7 +245,7 @@ class MainView(CommonView):
         for name, field in self.fields.items():
             if name not in ignore:
                 field.disabled = disabled
-                field.update()
+                _safe_update(field)
         self.push_data(e)
 
     def sanitize_data(self):
@@ -263,6 +281,154 @@ class MainView(CommonView):
             # Process enable
             self.process_enable(e)
         return super().did_mount()
+
+
+def _safe_update(ctrl):
+    """Call ctrl.update() only when the control is already mounted in the page."""
+    try:
+        ctrl.update()
+    except AssertionError:
+        pass
+
+
+def _compact_dropdown(field: 'DropdownWithSearch', sr_w: int) -> ft.Container:
+    """Wrap a DropdownWithSearch so it fills its column and clips search expansion.
+
+    The dropdown itself expands to fill available width (no fixed pixel width).
+    The search box animates to sr_w but is clipped at the container boundary so
+    it never overflows into adjacent columns.
+    """
+    # Let the dropdown expand to fill whatever the column gives it
+    field.dropdown.width = None
+    field.dropdown.expand = True
+    # Keep the search field at a reasonable fixed width; it animates from 0
+    field.search_field.width = sr_w
+    field.search_width = sr_w
+    return ft.Container(
+        content=field,
+        expand=True,
+        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+    )
+
+
+def _compact_inventree_column(view: 'InventreeView', sr_w: int):
+    """Rebuild InventreeView.column controls with a narrow, wrapping-safe layout."""
+    # Let text fields expand rather than use fixed pixel widths
+    for key in ('IPN: Category Code', 'New Category Code', 'Existing Part ID', 'Existing Part IPN', 'Stock quantity'):
+        if key in view.fields and hasattr(view.fields[key], 'expand'):
+            view.fields[key].width = None
+            view.fields[key].expand = True
+    # Resize buttons to fit label (remove fixed width, let text determine size)
+    for key in ('load_categories', 'load_stock_locations'):
+        view.fields[key].width = None
+
+    view.column.controls = [
+        ft.Row([view.fields['enable'], view.fields['alternate']], spacing=8),
+        ft.Row([view.fields['load_categories']], spacing=0),
+        _compact_dropdown(view.fields['Category'], sr_w),
+        ft.Row(
+            ref=view.ipncode_row_ref,
+            controls=[view.fields['IPN: Category Code'], view.fields['Create New Code']],
+            spacing=4,
+        ),
+        ft.Row([view.fields['New Category Code']]),
+        ft.Row([view.fields['check_existing']]),
+        ft.Column(
+            ref=view.alternate_row_ref,
+            controls=[
+                ft.Row([view.fields['Existing Part ID'], view.fields['Existing Part IPN']], spacing=4),
+                ft.Row([view.fields['Update Parameter']]),
+            ],
+        ),
+        ft.Column(
+            ref=view.create_stock_widgets_ref,
+            controls=[ft.Row([view.fields['Create stock']])],
+        ),
+        _compact_dropdown(view.fields['Stock location'], sr_w),
+        ft.Row([view.fields['load_stock_locations']], spacing=0),
+        ft.Row([view.fields['Part barcode']]),
+        ft.Column(
+            ref=view.create_stock_widgets_ref,
+            controls=[
+                ft.Row([view.fields['Stock quantity']]),
+                ft.Row([view.fields['Make stock location default']]),
+            ],
+        ),
+    ]
+
+
+def _compact_kicad_column(view: 'KicadView', sr_w: int):
+    """Rebuild KicadView.column controls replacing raw field list with wrapped dropdowns."""
+    view.fields['New Footprint Name'].width = None
+    view.fields['New Footprint Name'].expand = True
+    view.fields['Check SnapEDA'].width = None  # auto-size to content
+
+    view.column.controls = [
+        ft.Row([view.fields['enable']]),
+        _compact_dropdown(view.fields['Symbol Library'], sr_w),
+        _compact_dropdown(view.fields['Symbol Template'], sr_w),
+        _compact_dropdown(view.fields['Footprint Library'], sr_w),
+        _compact_dropdown(view.fields['Footprint'], sr_w),
+        ft.Row([view.fields['New Footprint'], view.fields['New Footprint Name']], spacing=4),
+        ft.Row([view.fields['Check SnapEDA']]),
+    ]
+
+
+def _compact_create_column(view: 'CreateView'):
+    """Rebuild CreateView.column controls without hardcoded row widths."""
+    # Progress bars — let them expand to fill the column
+    view.fields['inventree_progress'].width = None
+    view.fields['inventree_progress'].expand = True
+    view.fields['kicad_progress'].width = None
+    view.fields['kicad_progress'].expand = True
+    # Bulk excel text field — expand to fill the column
+    view.fields['bulk_excel_path'].width = None
+    view.fields['bulk_excel_path'].expand = True
+    view.fields['bulk_excel_path'].hint_text = 'Select an Excel file…'
+    # Resize buttons to auto-width
+    for key in ('bulk_excel_pick', 'bulk_import', 'create', 'cancel'):
+        view.fields[key].width = None
+    # Strip extra icons from Create Part / Cancel to save space
+    view.fields['create'].content = ft.Row(
+        [ft.Icon('build_circle'), ft.Text('Create Part', size=16)], spacing=4
+    )
+    view.fields['cancel'].content = ft.Row(
+        [ft.Icon('highlight_remove'), ft.Text('Cancel', size=16)], spacing=4
+    )
+    view.fields['bulk_excel_pick'].content = ft.Row(
+        [ft.Icon(ft.icons.UPLOAD_FILE), ft.Text('Select Excel', size=14)], spacing=4
+    )
+    view.fields['bulk_import'].content = ft.Row(
+        [ft.Icon(ft.icons.PLAYLIST_ADD_CHECK_CIRCLE), ft.Text('Bulk Import', size=14)], spacing=4
+    )
+
+    view.column.controls = [
+        ft.Row([view.fields['bulk_status']]),
+        ft.Row([view.fields['bulk_excel_path']], expand=True),
+        ft.Row([view.fields['bulk_excel_pick'], view.fields['bulk_import']], spacing=6),
+        ft.Row([view.fields['create'], view.fields['cancel']], spacing=6),
+        ft.Row(height=8),
+        ft.Row(
+            ref=view.inventree_progress_row,
+            controls=[
+                ft.Icon(ft.icons.INVENTORY_2, size=24),
+                ft.Text('InvenTree', size=14, weight=ft.FontWeight.BOLD, width=80),
+                view.fields['inventree_progress'],
+            ],
+            expand=True,
+            visible=settings.ENABLE_INVENTREE,
+        ),
+        ft.Row(
+            ref=view.kicad_progress_row,
+            controls=[
+                ft.Icon(ft.icons.SETTINGS_INPUT_COMPONENT, size=24),
+                ft.Text('KiCad', size=14, weight=ft.FontWeight.BOLD, width=80),
+                view.fields['kicad_progress'],
+            ],
+            expand=True,
+            visible=settings.ENABLE_KICAD,
+        ),
+    ]
 
 
 class PartSearchView(MainView):
@@ -435,6 +601,11 @@ class PartSearchView(MainView):
     def partial_update(self):
         # Update supplier options
         self.update_suppliers()
+        # Refresh embedded sub-views after settings changes (compact layout only)
+        if settings.COMPACT_LAYOUT and self._inventree_view is not None:
+            self._inventree_view.partial_update()
+        if settings.COMPACT_LAYOUT and self._kicad_view is not None:
+            self._kicad_view.partial_update()
     
     def update_suppliers(self):
         # Reload suppliers
@@ -472,6 +643,10 @@ class PartSearchView(MainView):
         else:
             for field, text_field in self.fields['parameter_form'].items():
                 self.column.controls[0].content.controls.append(ft.Row([text_field]))
+        # Re-append embedded sub-view sections (compact layout only)
+        if settings.COMPACT_LAYOUT and self._embedded_sections:
+            self.column.controls[0].content.controls.append(ft.Divider(height=16))
+            self.column.controls[0].content.controls.extend(self._embedded_sections)
         self._page.update()
 
     def perform_pn_search(self, e):
@@ -527,6 +702,78 @@ class PartSearchView(MainView):
             self.column.controls[0].content.controls.append(ft.Row([text_field]))
             self.fields['search_form'][field] = text_field
 
+        # ---- Embedded sub-views (compact layout only) ----
+        self._inventree_view = None
+        self._kicad_view = None
+        self._create_view = None
+        self._embedded_sections = []
+
+        if settings.COMPACT_LAYOUT:
+            _SR_W = 180   # search field width inside DropdownWithSearch
+
+            self._inventree_view = InventreeView(self._page)
+            self._inventree_view.build_column()
+            _compact_inventree_column(self._inventree_view, _SR_W)
+
+            self._kicad_view = KicadView(self._page)
+            self._kicad_view.build_column()
+            _compact_kicad_column(self._kicad_view, _SR_W)
+
+            self._create_view = CreateView(self._page)
+            self._create_view.build_column()
+            _compact_create_column(self._create_view)
+
+            # When InvenTree or KiCad is toggled, also refresh the Create progress bars.
+            def _wrap_enable(view):
+                original_on_change = view.fields['enable'].on_change
+
+                def _on_change_with_progress_reset(e):
+                    if original_on_change:
+                        original_on_change(e)
+                    self._create_view.reset_progress_bars()
+
+                view.fields['enable'].on_change = _on_change_with_progress_reset
+
+            _wrap_enable(self._inventree_view)
+            _wrap_enable(self._kicad_view)
+
+            def _panel(title: str, icon, sub_col: ft.Column) -> ft.Column:
+                return ft.Column(
+                    controls=[
+                        ft.Row(
+                            controls=[
+                                ft.Icon(icon, size=20),
+                                ft.Text(title, style=ft.TextThemeStyle.TITLE_MEDIUM,
+                                        weight=ft.FontWeight.BOLD),
+                            ],
+                            spacing=6,
+                        ),
+                        ft.Divider(height=6),
+                        sub_col,
+                    ],
+                    spacing=4,
+                    expand=True,
+                )
+
+            self._embedded_sections = [
+                ft.Row(
+                    controls=[
+                        _panel('InvenTree', ft.icons.INVENTORY_2, self._inventree_view.column),
+                        ft.VerticalDivider(width=1),
+                        _panel('KiCad', ft.icons.SETTINGS_INPUT_COMPONENT, self._kicad_view.column),
+                        ft.VerticalDivider(width=1),
+                        _panel('Create', ft.icons.BUILD, self._create_view.column),
+                    ],
+                    spacing=12,
+                    expand=True,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                )
+            ]
+            self.column.controls[0].content.controls.extend([
+                ft.Divider(height=16),
+                *self._embedded_sections,
+            ])
+
     def did_mount(self, enable=False):
         if (
             not self.fields['part_number'].value
@@ -537,6 +784,24 @@ class PartSearchView(MainView):
                 d_type=DialogType.WARNING,
                 message='To create a Custom Part click on the Submit button',
             )
+        if settings.COMPACT_LAYOUT and self._inventree_view is not None:
+            # Initialize embedded sub-views (populate dropdowns, apply enable flags).
+            # Call process_enable directly to avoid ft.View lifecycle on non-mounted views.
+            def _make_enable_event(view, enabled):
+                return ft.ControlEvent(
+                    target=None,
+                    name='did_mount_enable',
+                    data='true' if enabled else 'false',
+                    page=self._page,
+                    control=view.fields['enable'],
+                )
+            self._inventree_view.process_enable(
+                _make_enable_event(self._inventree_view, settings.ENABLE_INVENTREE)
+            )
+            self._kicad_view.process_enable(
+                _make_enable_event(self._kicad_view, settings.ENABLE_KICAD)
+            )
+            self._create_view.reset_progress_bars()
         return super().did_mount(enable)
 
 
@@ -673,7 +938,7 @@ class InventreeView(MainView):
         if not inventree_enable:
             # If InvenTree disabled
             self.fields['alternate'].value = inventree_enable
-            self.fields['alternate'].update()
+            _safe_update(self.fields['alternate'])
             self.process_alternate(e, value=inventree_enable)
             self.process_create_stock(e, value=inventree_enable)
         else:
@@ -699,15 +964,15 @@ class InventreeView(MainView):
 
         # Load category button
         self.fields['load_categories'].disabled = alt_visible
-        self.fields['load_categories'].update()
+        _safe_update(self.fields['load_categories'])
 
         # Category row visibility
         self.category_row_ref.current.visible = not alt_visible
-        self.category_row_ref.current.update()
+        _safe_update(self.category_row_ref.current)
 
         # Alternate row visibility
         self.alternate_row_ref.current.visible = alt_visible
-        self.alternate_row_ref.current.update()
+        _safe_update(self.alternate_row_ref.current)
 
         # Update settings
         settings.set_enable_flag('alternate', alt_visible)
@@ -758,7 +1023,7 @@ class InventreeView(MainView):
             code = config_interface.load_file(settings.CONFIG_CATEGORIES)['CODES'].get(parent_category, None)
             if code and not self.fields['Create New Code'].value:
                 self.fields['IPN: Category Code'].value = code
-            self.fields['IPN: Category Code'].update()
+            _safe_update(self.fields['IPN: Category Code'])
         self.push_data(e)
 
     def process_location(self, e=None, label=None, value=None):
@@ -770,7 +1035,7 @@ class InventreeView(MainView):
             settings.CONFIG_IPN.get('IPN_ENABLE_CREATE', False) and settings.CONFIG_IPN.get('IPN_CATEGORY_CODE', False)
         )
         self.ipncode_row_ref.current.visible = ipncode_enable
-        self.ipncode_row_ref.current.update()
+        _safe_update(self.ipncode_row_ref.current)
 
     def process_create_stock(self, e, value=None):
         if value is not None:
@@ -784,7 +1049,7 @@ class InventreeView(MainView):
 
         # Stock create row visibility
         self.create_stock_widgets_ref.current.visible = create_stock_visible
-        self.create_stock_widgets_ref.current.update()
+        _safe_update(self.create_stock_widgets_ref.current)
 
     def get_code_options(self):
         try:
@@ -1077,7 +1342,7 @@ class KicadView(MainView):
         super().process_enable(e, value, ignore)
         if self.fields['enable'].value:
             self.fields['Footprint'].disabled = self.fields['New Footprint'].value
-            self.fields['Footprint'].update()
+            _safe_update(self.fields['Footprint'])
         
     def push_data(self, e=None, label=None, value=None, **_):
         super().push_data(e)
@@ -1905,27 +2170,31 @@ class CreateView(MainView):
     
     def reset_progress_bars(self):
         # Setup progress bars
-        if not settings.ENABLE_INVENTREE:
-            self.inventree_progress_row.current.visible = False
-        else:
-            self.inventree_progress_row.current.visible = True
-            # Reset progress bar
-            progress.reset_progress_bar(self.fields['inventree_progress'])
-        self.inventree_progress_row.current.update()
+        inv_row = self.inventree_progress_row.current if self.inventree_progress_row else None
+        if inv_row is not None:
+            if not settings.ENABLE_INVENTREE:
+                inv_row.visible = False
+            else:
+                inv_row.visible = True
+                # Reset progress bar
+                progress.reset_progress_bar(self.fields['inventree_progress'])
+            _safe_update(inv_row)
 
-        if not settings.ENABLE_KICAD:
-            self.kicad_progress_row.current.visible = False
-        else:
-            self.kicad_progress_row.current.visible = True
-            # Reset progress bar
-            progress.reset_progress_bar(self.fields['kicad_progress'])
-        self.kicad_progress_row.current.update()
+        kicad_row = self.kicad_progress_row.current if self.kicad_progress_row else None
+        if kicad_row is not None:
+            if not settings.ENABLE_KICAD:
+                kicad_row.visible = False
+            else:
+                kicad_row.visible = True
+                # Reset progress bar
+                progress.reset_progress_bar(self.fields['kicad_progress'])
+            _safe_update(kicad_row)
 
         if not settings.ENABLE_INVENTREE and not settings.ENABLE_KICAD:
             self.fields['create'].disabled = True
         else:
             self.fields['create'].disabled = False
-        self.fields['create'].update()
+        _safe_update(self.fields['create'])
         
     def create_part(self, e=None):
         create_start_ts = time.perf_counter()

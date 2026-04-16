@@ -35,12 +35,12 @@ def cprint(*args, **kwargs):
                     args[0] = f'{pcolors.WARNING}{args[0]}{pcolors.ENDC}'
                 elif 'error' in args[0].lower():
                     args[0] = f'{pcolors.ERROR}{args[0]}{pcolors.ENDC}'
-                elif 'fail' in args[0].lower():
-                    args[0] = f'{pcolors.ERROR}{args[0]}{pcolors.ENDC}'
                 elif 'success' in args[0].lower():
                     args[0] = f'{pcolors.OKGREEN}{args[0]}{pcolors.ENDC}'
                 elif 'pass' in args[0].lower():
                     args[0] = f'{pcolors.OKGREEN}{args[0]}{pcolors.ENDC}'
+                elif 'fail' in args[0].lower():
+                    args[0] = f'{pcolors.ERROR}{args[0]}{pcolors.ENDC}'
                 elif 'main' in args[0].lower():
                     args[0] = f'{pcolors.HEADER}{args[0]}{pcolors.ENDC}'
                 elif 'skipping' in args[0].lower():
