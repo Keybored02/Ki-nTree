@@ -8,6 +8,7 @@ import flet as ft
 import requests
 
 from ...database import pickup_api
+from ...database import pickup_history
 from ...database.inventree_api import get_inventree_api
 from ...search.barcode_parser import BarcodeParser
 from .barcode import _BarcodeApiHelpers
@@ -57,21 +58,28 @@ class GuidedPickupModal:
     MODE_IN  = 'in'
 
     def __init__(self, page: ft.Page, items: List[PickupItem],
-                 find_part_fn, on_close_fn, mode: str = 'out'):
+                 find_part_fn, on_close_fn, mode: str = 'out',
+                 query: str = '', label: str = '', record_id: Optional[str] = None):
         """
         Parameters
         ----------
         page            Flet page reference.
         items           Full list of PickupItems from the BOM resolve.
         find_part_fn    Callable(lookup_value) -> Optional[dict]
-        on_close_fn     Called when the modal closes; receives list of PickupItems.
+        on_close_fn     Called when the modal closes; receives (items, record_id).
         mode            'out' (pickup) or 'in' (put-down).
+        query           Original search query — used for history persistence.
+        label           Human-readable op label.
+        record_id       Existing history record to update, or None for new.
         """
         self._page = page
         self._items = items
         self._find_part = find_part_fn
         self._on_close = on_close_fn
         self._mode = mode
+        self._query = query
+        self._label = label
+        self._record_id = record_id
         self._current_location: Optional[str] = None
         self._current_part_pk: Optional[int] = None  # IN mode: part scanned first
         self._parent_filter: Optional[str] = None   # set when a parent location was scanned
@@ -302,6 +310,7 @@ class GuidedPickupModal:
     # ------------------------------------------------------------------ #
 
     def open(self):
+        self._refresh_counter()
         self._page.open(self._dialog)
         # Defer focus slightly so the dialog is fully rendered before focusing
         def _deferred_focus():
@@ -965,18 +974,29 @@ class GuidedPickupModal:
         self._focus_input()
 
     # ------------------------------------------------------------------ #
-    #  Close                                                               #
+    #  Close / save                                                        #
     # ------------------------------------------------------------------ #
 
     def _on_close_click(self, e):
+        """First click: save to history, then warn if incomplete."""
+        # Always save current state before closing
+        self._record_id = pickup_history.save_op(
+            record_id=self._record_id,
+            query=self._query,
+            label=self._label,
+            mode=self._mode,
+            items=self._items,
+        )
+
         incomplete = [it for it in self._items if not it.scanned and not it.checked]
         if incomplete:
             verb = 'put down' if self._mode == self.MODE_IN else 'picked'
-            # Swap close button to a confirm-anyway button
-            self._close_btn.text = f'Close anyway ({len(incomplete)} item(s) remaining)'
+            self._close_btn.text = f'Close anyway ({len(incomplete)} remaining)'
             self._close_btn.icon = ft.icons.WARNING_AMBER_ROUNDED
             self._close_btn.icon_color = 'orange'
-            self._status_text.value = f'Warning: {len(incomplete)} item(s) not yet {verb}.'
+            self._status_text.value = (
+                f'Saved. {len(incomplete)} item(s) not yet {verb} — resume from history.'
+            )
             self._status_text.color = 'orange'
             self._close_btn.on_click = self._force_close
             try:
@@ -989,7 +1009,7 @@ class GuidedPickupModal:
 
     def _force_close(self, e):
         self._page.close(self._dialog)
-        self._on_close(self._items)
+        self._on_close(self._items, self._record_id)
 
     # ------------------------------------------------------------------ #
     #  Helpers                                                             #
@@ -1043,6 +1063,11 @@ class PickupView(MainView):
         self._search_thread: Optional[threading.Thread] = None
         self._guided_modal: Optional[GuidedPickupModal] = None
 
+        # History state — set when loading from a saved record
+        self._current_record_id: Optional[str] = None
+        self._current_query: str = ''
+        self._current_label: str = ''
+
         # Part lookup — same cache/lock/http attributes expected by _BarcodeApiHelpers
         self._http = requests.Session()
         self._part_lookup_cache: Dict[str, Optional[Dict]] = {}
@@ -1084,49 +1109,8 @@ class PickupView(MainView):
             on_change=self._on_mode_change,
         )
 
-        # Guided mode checkbox
-        self.fields['guided_mode'] = ft.Checkbox(
-            label='Guided mode',
-            value=True,
-            tooltip='Step through locations one at a time with barcode scanner',
-        )
-
         self._status_text = ft.Text('', size=13, color='grey', italic=True)
         self._progress = ft.ProgressBar(visible=False, width=GUI_PARAMS['textfield_width'])
-
-        # Results table
-        self._table = ft.DataTable(
-            columns=[
-                ft.DataColumn(ft.Text('', width=32)),
-                ft.DataColumn(ft.Text('Part Name')),
-                ft.DataColumn(ft.Text('Location')),
-                ft.DataColumn(ft.Text('Qty')),
-            ],
-            rows=[],
-            column_spacing=16,
-            horizontal_margin=8,
-            show_bottom_border=True,
-            expand=True,
-        )
-        self._table_scroll = ft.ListView(
-            controls=[self._table],
-            expand=True,
-            spacing=0,
-        )
-
-        self.fields['clear_btn'] = ft.OutlinedButton(
-            text='Clear',
-            icon=ft.icons.CLEAR_ALL,
-            on_click=self._on_clear,
-        )
-        self.fields['confirm_btn'] = ft.ElevatedButton(
-            text='Confirm',
-            icon=ft.icons.CHECK_CIRCLE_OUTLINE,
-            bgcolor='green',
-            color='white',
-            disabled=True,
-            on_click=self._on_confirm,
-        )
 
         search_row = ft.Row(
             controls=[
@@ -1146,21 +1130,36 @@ class PickupView(MainView):
                 ft.Text('In', size=13),
                 ft.Container(width=16),
                 self._mode_label,
-                ft.Container(width=24),
-                self.fields['guided_mode'],
-            ],
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-
-        action_row = ft.Row(
-            controls=[
-                self.fields['clear_btn'],
-                ft.Container(width=8),
-                self.fields['confirm_btn'],
                 ft.Container(expand=True),
                 self._status_text,
             ],
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        # History table
+        self._history_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text('Label')),
+                ft.DataColumn(ft.Text('OUT')),
+                ft.DataColumn(ft.Text('IN')),
+                ft.DataColumn(ft.Text('Last edited')),
+                ft.DataColumn(ft.Text('Actions')),
+            ],
+            rows=[],
+            column_spacing=12,
+            horizontal_margin=8,
+            show_bottom_border=True,
+        )
+        self._history_section = ft.Column(
+            controls=[
+                ft.Divider(height=12),
+                ft.Text('Operation History',
+                        style=ft.TextThemeStyle.TITLE_MEDIUM,
+                        weight=ft.FontWeight.BOLD),
+                ft.ListView(controls=[self._history_table], expand=False, height=220),
+            ],
+            spacing=4,
+            visible=False,
         )
 
         self.column = ft.Column(
@@ -1175,10 +1174,7 @@ class PickupView(MainView):
                             self._progress,
                             ft.Divider(height=4),
                             mode_row,
-                            ft.Divider(height=4),
-                            action_row,
-                            ft.Divider(height=2),
-                            self._table_scroll,
+                            self._history_section,
                         ],
                         scroll=ft.ScrollMode.AUTO,
                         spacing=6,
@@ -1190,15 +1186,23 @@ class PickupView(MainView):
             expand=True,
         )
 
+        # Populate history on initial load
+        self._rebuild_history_table()
+
     # ------------------------------------------------------------------ #
     #  Event handlers                                                      #
     # ------------------------------------------------------------------ #
 
-    def _on_search(self, e):
+    def _on_search(self, e, _keep_record_id: bool = False):
         query = (self.fields['bom_search'].value or '').strip()
         if not query:
             self._set_status('Enter a part name or build order (BO-xxx).', color='orange')
             return
+
+        self._current_query = query
+        self._current_label = query
+        if not _keep_record_id:
+            self._current_record_id = None
 
         self.fields['search_btn'].disabled = True
         self.fields['bom_search'].disabled = True
@@ -1224,6 +1228,11 @@ class PickupView(MainView):
                         quantity=r['quantity'],
                         reference=r.get('reference', ''),
                     ))
+            # Use the server-returned label if available (e.g. "Part: Resistor 10k")
+            if ok and message:
+                # message format: "Part: Foo — N item(s)"  or  "Build order BO-1 — N item(s)"
+                self._current_label = message.split(' — ')[0].strip()
+
             self.fields['search_btn'].disabled = False
             self.fields['bom_search'].disabled = False
             self._progress.visible = False
@@ -1237,9 +1246,16 @@ class PickupView(MainView):
             self._load_items(items)
             self._set_status(message, color='green' if ok else 'red')
 
-            # Auto-open guided modal if enabled and load succeeded
-            if ok and items and self.fields['guided_mode'].value:
-                self._open_guided_modal()
+            if ok and items:
+                if _keep_record_id:
+                    # Called from history action — go straight to modal
+                    self._open_guided_modal()
+                else:
+                    match = self._find_history_match(query)
+                    if match:
+                        self._show_continuation_dialog(match, items)
+                    else:
+                        self._open_guided_modal()
 
         self._search_thread = threading.Thread(target=_run, daemon=True)
         self._search_thread.start()
@@ -1253,52 +1269,116 @@ class PickupView(MainView):
             self._mode = self.MODE_OUT
             self._mode_label.value = 'Out (Pickup)'
             self._mode_label.color = 'blue'
-        self._mode_label.update()
-        self._rebuild_table()
-
-    def _on_clear(self, e):
-        self._items.clear()
-        self.fields['bom_search'].value = ''
-        self.fields['confirm_btn'].disabled = True
-        self._set_status('', color='grey')
-        self._rebuild_table()
         try:
-            self.fields['bom_search'].update()
-            self.fields['confirm_btn'].update()
+            self._mode_label.update()
         except Exception:
             pass
-
-    def _on_confirm(self, e):
-        if self.fields['guided_mode'].value:
-            self._open_guided_modal()
-            return
-        checked = [it for it in self._items if it.checked]
-        mode_label = 'picked up' if self._mode == self.MODE_OUT else 'put down'
-        self._set_status(f'{len(checked)} item(s) marked as {mode_label}.', color='green')
-
-    def _on_row_check(self, e, item: PickupItem):
-        item.checked = bool(e.control.value)
-        any_checked = any(it.checked for it in self._items)
-        self.fields['confirm_btn'].disabled = not any_checked
-        try:
-            self.fields['confirm_btn'].update()
-        except Exception:
-            pass
-
-    def _on_select_all(self, e):
-        checked = bool(e.control.value)
-        for item in self._items:
-            item.checked = checked
-        self.fields['confirm_btn'].disabled = not (checked and bool(self._items))
-        try:
-            self.fields['confirm_btn'].update()
-        except Exception:
-            pass
-        self._rebuild_table()
 
     # ------------------------------------------------------------------ #
     #  Guided modal                                                        #
     # ------------------------------------------------------------------ #
+
+    def _find_history_match(self, query: str) -> Optional[Dict]:
+        """Return the most-recent history record whose query matches *query*, or None."""
+        q = query.strip().lower()
+        for rec in pickup_history.list_records():
+            if rec.get('query', '').strip().lower() == q:
+                return rec
+        return None
+
+    def _show_continuation_dialog(self, record: Dict, fresh_items: List['PickupItem']):
+        """Show a dialog offering to resume/continue an existing op or start fresh."""
+        out_st = record.get('out', {}).get('status', 'not_started')
+        in_st  = record.get('in',  {}).get('status', 'not_started')
+        label  = record.get('label', record.get('query', ''))
+
+        _ST = {'complete': '✓ Complete', 'incomplete': '… Incomplete', 'not_started': '— Not started'}
+        summary = (
+            f'OUT: {_ST.get(out_st, out_st)}    |    IN: {_ST.get(in_st, in_st)}'
+        )
+
+        actions = []
+
+        def _close_dlg(dlg):
+            try:
+                self._page.close(dlg)
+            except Exception:
+                pass
+
+        # OUT buttons
+        if out_st == 'incomplete':
+            def _do_resume_out(e, d=record):
+                _close_dlg(dlg)
+                self._history_resume(d, 'out')
+            actions.append(ft.TextButton(
+                'Resume OUT', icon=ft.icons.PLAY_ARROW,
+                style=ft.ButtonStyle(color='blue'),
+                on_click=_do_resume_out,
+            ))
+        elif out_st == 'not_started':
+            def _do_start_out(e, d=record):
+                _close_dlg(dlg)
+                self._history_start_out(d)
+            actions.append(ft.TextButton(
+                'Start OUT', icon=ft.icons.OUTPUT,
+                style=ft.ButtonStyle(color='blue'),
+                on_click=_do_start_out,
+            ))
+
+        # IN buttons
+        if in_st == 'incomplete':
+            def _do_resume_in(e, d=record):
+                _close_dlg(dlg)
+                self._history_resume(d, 'in')
+            actions.append(ft.TextButton(
+                'Resume IN', icon=ft.icons.PLAY_ARROW,
+                style=ft.ButtonStyle(color='teal'),
+                on_click=_do_resume_in,
+            ))
+        elif in_st == 'not_started':
+            def _do_start_in(e, d=record):
+                _close_dlg(dlg)
+                self._history_start_mode(d, 'in')
+            actions.append(ft.TextButton(
+                'Start IN', icon=ft.icons.INPUT,
+                style=ft.ButtonStyle(color='teal'),
+                on_click=_do_start_in,
+            ))
+
+        # Fresh OUT — new record, use already-loaded fresh_items (no server refetch)
+        def _do_fresh(e):
+            _close_dlg(dlg)
+            self._current_record_id = None
+            self._mode = self.MODE_OUT
+            self.fields['mode_toggle'].value = False
+            self._mode_label.value = 'Out (Pickup)'
+            self._mode_label.color = 'blue'
+            try:
+                self.fields['mode_toggle'].update()
+                self._mode_label.update()
+            except Exception:
+                pass
+            self._load_items(fresh_items)
+            self._open_guided_modal()
+        actions.append(ft.TextButton(
+            'New OUT', icon=ft.icons.REFRESH,
+            style=ft.ButtonStyle(color='grey'),
+            on_click=_do_fresh,
+        ))
+
+        # Dismiss (do nothing, items already loaded)
+        def _do_dismiss(e):
+            _close_dlg(dlg)
+        actions.append(ft.TextButton('Dismiss', on_click=_do_dismiss))
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(f'Previous op found: {label}'),
+            content=ft.Text(summary, size=13),
+            actions=actions,
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self._page.open(dlg)
 
     def _open_guided_modal(self):
         self._guided_modal = GuidedPickupModal(
@@ -1307,17 +1387,21 @@ class PickupView(MainView):
             find_part_fn=self._find_part_by_lookup_simple,
             on_close_fn=self._on_guided_close,
             mode=self._mode,
+            query=self._current_query,
+            label=self._current_label,
+            record_id=self._current_record_id,
         )
         self._guided_modal.open()
 
-    def _on_guided_close(self, items: List[PickupItem]):
-        """Called when the modal closes; sync checked/scanned state back to main table."""
+    def _on_guided_close(self, items: List[PickupItem], record_id: Optional[str]):
+        """Called when the modal closes; sync state and refresh history."""
         self._items = items
-        self._rebuild_table()
+        self._current_record_id = record_id
+        self._rebuild_history_table()
         done = sum(1 for it in items if it.scanned or it.checked)
         verb = 'put down' if self._mode == self.MODE_IN else 'picked'
         self._set_status(
-            f'Guided session complete: {done}/{len(items)} item(s) {verb}.',
+            f'Saved. {done}/{len(items)} item(s) {verb}.',
             color='green' if done == len(items) else 'orange',
         )
 
@@ -1334,44 +1418,206 @@ class PickupView(MainView):
 
     def _load_items(self, items: List[PickupItem]):
         self._items = items
-        self._rebuild_table()
-        self.fields['confirm_btn'].disabled = not bool(items)
+
+    # ------------------------------------------------------------------ #
+    #  History panel                                                       #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _mode_counter(mode_dict: Dict) -> tuple:
+        """Return (text, color) like '3 / 5' for a saved mode dict."""
+        items = mode_dict.get('items', [])
+        status = mode_dict.get('status', 'not_started')
+        if not items:
+            return ('—', 'grey')
+        total = len(items)
+        done  = sum(1 for it in items if it.get('scanned') or it.get('checked'))
+        text  = f'{done} / {total}'
+        color = 'green' if done == total else ('orange' if done > 0 else 'grey')
+        return (text, color)
+
+    def _rebuild_history_table(self):
+        """Reload history records from disk and repopulate the history table."""
+        records = pickup_history.list_records()
+        self._history_section.visible = bool(records)
+        rows = []
+        for rec in records:
+            label   = rec.get('label', rec.get('query', '?'))
+            out_st  = rec.get('out', {}).get('status', 'not_started')
+            in_st   = rec.get('in',  {}).get('status', 'not_started')
+            updated = rec.get('updated_at', '')[:16].replace('T', ' ')
+
+            out_icon, out_col = self._mode_counter(rec.get('out', {}))
+            in_icon,  in_col  = self._mode_counter(rec.get('in',  {}))
+
+            # Action buttons
+            actions = []
+            if out_st == 'incomplete':
+                actions.append(ft.TextButton(
+                    'Resume OUT', icon=ft.icons.PLAY_ARROW,
+                    style=ft.ButtonStyle(color='blue'),
+                    on_click=lambda e, r=rec: self._history_resume(r, 'out'),
+                ))
+            elif out_st == 'not_started':
+                actions.append(ft.TextButton(
+                    'Start OUT', icon=ft.icons.OUTPUT,
+                    style=ft.ButtonStyle(color='blue'),
+                    on_click=lambda e, r=rec: self._history_start_out(r),
+                ))
+            if in_st == 'incomplete':
+                actions.append(ft.TextButton(
+                    'Resume IN', icon=ft.icons.PLAY_ARROW,
+                    style=ft.ButtonStyle(color='teal'),
+                    on_click=lambda e, r=rec: self._history_resume(r, 'in'),
+                ))
+            elif in_st == 'not_started':
+                actions.append(ft.TextButton(
+                    'Start IN', icon=ft.icons.INPUT,
+                    style=ft.ButtonStyle(color='teal'),
+                    on_click=lambda e, r=rec: self._history_start_mode(r, 'in'),
+                ))
+            actions.append(ft.IconButton(
+                icon=ft.icons.COPY_ALL_OUTLINED,
+                tooltip='Copy list (fresh search)',
+                on_click=lambda e, r=rec: self._history_copy(r),
+            ))
+            actions.append(ft.IconButton(
+                icon=ft.icons.DELETE_OUTLINE,
+                tooltip='Delete record', icon_color='red',
+                on_click=lambda e, r=rec: self._history_delete(r),
+            ))
+
+            rows.append(ft.DataRow(cells=[
+                ft.DataCell(ft.Text(label, size=12, no_wrap=True, selectable=True)),
+                ft.DataCell(ft.Text(out_icon, size=13, color=out_col, weight=ft.FontWeight.BOLD)),
+                ft.DataCell(ft.Text(in_icon,  size=13, color=in_col,  weight=ft.FontWeight.BOLD)),
+                ft.DataCell(ft.Text(updated,  size=11, color='grey')),
+                ft.DataCell(ft.Row(controls=actions, spacing=0, tight=True)),
+            ]))
+
+        self._history_table.rows = rows
         try:
-            self.fields['confirm_btn'].update()
+            self._history_section.update()
+            self._history_table.update()
         except Exception:
             pass
 
-    def _rebuild_table(self):
-        mode_verb = 'Pickup' if self._mode == self.MODE_OUT else 'Put-Down'
-        self._table.columns[0].label = ft.Checkbox(
-            value=False,
-            on_change=self._on_select_all,
-            tooltip=f'Select all for {mode_verb}',
-        )
-        rows = []
-        for item in self._items:
-            done = item.scanned or item.checked
-            qty_str = str(int(item.quantity)) if item.quantity == int(item.quantity) else str(item.quantity)
-            loc_color = 'grey' if item.location == '(no location)' else None
-            name_color = 'green' if done else None
-            row = ft.DataRow(
-                cells=[
-                    ft.DataCell(ft.Checkbox(
-                        value=item.checked,
-                        on_change=lambda e, it=item: self._on_row_check(e, it),
-                    )),
-                    ft.DataCell(ft.Text(item.part_name, size=12, no_wrap=True, color=name_color)),
-                    ft.DataCell(ft.Text(item.location, size=12, italic=True, color=loc_color)),
-                    ft.DataCell(ft.Text(qty_str, size=12)),
-                ],
-                color=ft.colors.GREEN_50 if done else None,
+    def _history_resume(self, record: Dict, mode: str):
+        """Load saved items for *mode* and open the guided modal to resume."""
+        mode_data = record.get(mode, {})
+        raw_items = mode_data.get('items', [])
+        items = []
+        for d in raw_items:
+            it = PickupItem(
+                part_pk=d['part_pk'], part_name=d['part_name'],
+                location=d['location'], quantity=d['quantity'],
+                reference=d.get('reference', ''),
             )
-            rows.append(row)
-        self._table.rows = rows
+            it.scanned = bool(d.get('scanned', False))
+            it.checked = bool(d.get('checked', False))
+            items.append(it)
+
+        self._current_record_id = record.get('id')
+        self._current_query     = record.get('query', '')
+        self._current_label     = record.get('label', self._current_query)
+        self._mode = mode
+        self.fields['mode_toggle'].value = (mode == self.MODE_IN)
+        self._mode_label.value = 'In (Put-Down)' if mode == self.MODE_IN else 'Out (Pickup)'
+        self._mode_label.color = 'green' if mode == self.MODE_IN else 'blue'
+        self.fields['bom_search'].value = self._current_query
         try:
-            self._table.update()
+            self.fields['mode_toggle'].update()
+            self._mode_label.update()
+            self.fields['bom_search'].update()
         except Exception:
             pass
+
+        self._load_items(items)
+        self._set_status(f'Resumed: {self._current_label}', color='grey')
+        if items:
+            self._open_guided_modal()
+
+    def _items_from_record(self, record: Dict, reset_state: bool = True) -> List[PickupItem]:
+        """Extract PickupItems from whichever mode in *record* has items.
+
+        Preference order: out → in (first non-empty list wins).
+        If *reset_state* is True, scanned/checked flags are cleared.
+        """
+        raw: List[Dict] = []
+        for mode_key in ('out', 'in'):
+            candidate = record.get(mode_key, {}).get('items', [])
+            if candidate:
+                raw = candidate
+                break
+        items = []
+        for d in raw:
+            it = PickupItem(
+                part_pk=d['part_pk'], part_name=d['part_name'],
+                location=d['location'], quantity=d['quantity'],
+                reference=d.get('reference', ''),
+            )
+            if not reset_state:
+                it.scanned = bool(d.get('scanned', False))
+                it.checked = bool(d.get('checked', False))
+            items.append(it)
+        return items
+
+    def _history_start_mode(self, record: Dict, mode: str):
+        """Start a fresh *mode* session using saved item list (no server fetch)."""
+        items = self._items_from_record(record, reset_state=True)
+
+        self._current_record_id = record.get('id')
+        self._current_query     = record.get('query', '')
+        self._current_label     = record.get('label', self._current_query)
+        self._mode = mode
+        self.fields['mode_toggle'].value = (mode == self.MODE_IN)
+        self._mode_label.value = 'In (Put-Down)' if mode == self.MODE_IN else 'Out (Pickup)'
+        self._mode_label.color = 'green' if mode == self.MODE_IN else 'blue'
+        self.fields['bom_search'].value = self._current_query
+        try:
+            self.fields['mode_toggle'].update()
+            self._mode_label.update()
+            self.fields['bom_search'].update()
+        except Exception:
+            pass
+
+        self._load_items(items)
+        verb = 'IN' if mode == self.MODE_IN else 'OUT'
+        self._set_status(f'Starting {verb} for: {self._current_label}', color='grey')
+        if items:
+            self._open_guided_modal()
+
+    def _history_start_out(self, record: Dict):
+        """Start a fresh OUT session using saved item list (no server fetch)."""
+        self._history_start_mode(record, self.MODE_OUT)
+
+    def _history_copy(self, record: Dict):
+        """Duplicate the saved item list into a brand-new operation (no server fetch)."""
+        items = self._items_from_record(record, reset_state=True)
+        if not items:
+            return
+        self._current_record_id = None
+        self._current_query  = record.get('query', '')
+        self._current_label  = record.get('label', self._current_query)
+        self._mode = self.MODE_OUT
+        self.fields['mode_toggle'].value = False
+        self._mode_label.value = 'Out (Pickup)'
+        self._mode_label.color = 'blue'
+        self.fields['bom_search'].value = self._current_query
+        try:
+            self.fields['mode_toggle'].update()
+            self._mode_label.update()
+            self.fields['bom_search'].update()
+        except Exception:
+            pass
+        self._load_items(items)
+        self._set_status(f'Copied: {self._current_label}', color='grey')
+        self._open_guided_modal()
+
+    def _history_delete(self, record: Dict):
+        """Delete a history record and refresh the table."""
+        pickup_history.delete_record(record.get('id', ''))
+        self._rebuild_history_table()
 
     def _set_status(self, msg: str, color: str = 'grey'):
         self._status_text.value = msg

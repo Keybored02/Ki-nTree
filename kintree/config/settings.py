@@ -223,6 +223,7 @@ def load_cache_settings():
     global search_datasheets
     global CACHE_ENABLED
     global DIGIKEY_STORAGE_PATH
+    global pickup_ops_dir
 
     USER_SETTINGS = config_interface.load_user_paths(home_dir=HOME_DIR)
 
@@ -249,6 +250,11 @@ def load_cache_settings():
 
     # API token storage path
     DIGIKEY_STORAGE_PATH = os.path.join(USER_SETTINGS['USER_CACHE'], '')
+
+    # Pickup / put-down operation history
+    pickup_ops_dir = os.path.join(USER_SETTINGS['USER_CACHE'], 'pickup', '')
+    if not os.path.exists(pickup_ops_dir):
+        os.makedirs(pickup_ops_dir)
 
 
 # Load cache settings
