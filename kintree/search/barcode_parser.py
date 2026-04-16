@@ -22,7 +22,7 @@ All parsers return a normalized dict with:
 """
 
 import re
-from typing import Dict, List
+from typing import Dict
 
 
 class BarcodeParser:
@@ -109,29 +109,6 @@ class BarcodeParser:
             return '[)>' + data
 
         return data
-
-    @staticmethod
-    def _extract_compact_quantity(data: str) -> int:
-        """Extract quantity from compact GS1 text where delimiters may be missing.
-
-        Some scanner outputs omit group separators and collapse fields into a
-        single string, e.g. ``Q511K...`` where quantity is ``5`` and ``11K``
-        starts the next field. This helper prioritizes those boundaries and
-        falls back to the broader Q<digits> pattern.
-        """
-        # Prefer quantity followed by known compact field starts (11K / 11Z).
-        qty_match = re.search(r'Q(\d+?)(?=11[ZK])', data)
-        if not qty_match:
-            # Fallback: stop at next alpha field marker.
-            qty_match = re.search(r'Q(\d+?)(?=[A-Z])', data)
-
-        if not qty_match:
-            return 0
-
-        try:
-            return int(qty_match.group(1))
-        except (TypeError, ValueError):
-            return 0
 
     @staticmethod
     def detect_supplier(barcode: str) -> str:
@@ -269,322 +246,191 @@ class BarcodeParser:
 
         return normalized
 
+    # ------------------------------------------------------------------
+    # Fixed-order sequence parsing
+    # ------------------------------------------------------------------
+    # When scanners strip \x1d (GS) delimiters, walking any-identifier-
+    # anywhere is ambiguous: MPNs starting with K/P or ending with -P get
+    # misread as new ECIA fields. Instead we walk the payload positionally,
+    # only looking for the *next expected identifier in the documented
+    # supplier sequence*. Each field captures everything until the next
+    # expected identifier starts, or end-of-string.
+    #
+    # Each entry is (identifier, field_name, required).
+    # `required=False` means the field may be skipped if absent; we try to
+    # match it and advance only on success.
+    _DIGIKEY_SEQUENCE = [
+        ('P',    SUPPLIER_PART_NUMBER,     True),   # P<dk_pn>-ND
+        ('1P',   MANUFACTURER_PART_NUMBER, True),   # 1P<mpn>
+        ('30P',  SUPPLIER_PART_NUMBER,     False),  # 30P<dk_pn>-ND (repeat)
+        ('K',    CUSTOMER_ORDER_NUMBER,    False),  # K<cust_order>
+        ('1K',   SUPPLIER_ORDER_NUMBER,    False),  # 1K<sales_order>
+        ('10K',  INVOICE_NUMBER,           False),  # 10K<invoice>
+        ('9D',   DATE_CODE,                False),  # 9D<YYWW>
+        ('1T',   LOT_CODE,                 False),  # 1T<lot>
+        ('11K',  PACKING_LIST_NUMBER,      False),  # 11K<packing>
+        ('4L',   COUNTRY_OF_ORIGIN,        False),  # 4L<country>
+        ('Q',    QUANTITY,                 False),  # Q<qty>
+        ('11Z',  '_trailer',               False),  # 11Z<pick> — terminates Q
+    ]
+
+    _MOUSER_SEQUENCE = [
+        ('K',    CUSTOMER_ORDER_NUMBER,    True),   # K<cust_order>
+        ('14K',  PURCHASE_ORDER_LINE,      False),  # 14K<po_line>
+        ('1P',   MANUFACTURER_PART_NUMBER, True),   # 1P<mpn> (Mouser: MPN, not supplier PN)
+        ('Q',    QUANTITY,                 True),   # Q<qty>
+        ('11K',  PACKING_LIST_NUMBER,      False),  # 11K<pack>
+        ('10K',  INVOICE_NUMBER,           False),  # 10K<invoice>
+        ('4L',   COUNTRY_OF_ORIGIN,        False),  # 4L<country>
+        ('1V',   MANUFACTURER,             False),  # 1V<manufacturer>
+        ('1T',   LOT_CODE,                 False),  # 1T<lot>
+    ]
+
     @staticmethod
-    def parse_isoiec_15434_barcode(barcode_data: str) -> List[str]:
-        """Parse ISO/IEC 15434 barcode, returning split fields.
-
-        ISO/IEC 15434 format:
-            - Header: [)>\x1e06\x1d
-            - Fields: separated by \x1d (GS - Group Separator)
-            - Trailer: \x1e\x04 (RS/EOT)
-
-        Also handles old Mouser barcode format which starts with >[)>06\x1d
-        """
-        OLD_MOUSER_HEADER = '>[)>06\x1d'
-        STANDARD_HEADER = '[)>\x1e06\x1d'
-        TRAILER = '\x1e\x04'
-        DELIMITER = '\x1d'
-
-        # Handle old Mouser format
-        if barcode_data.startswith(OLD_MOUSER_HEADER):
-            barcode_data = barcode_data.replace(OLD_MOUSER_HEADER, STANDARD_HEADER, 1)
-
-        # Check for standard header
-        if not barcode_data.startswith(STANDARD_HEADER):
-            return []
-
-        # Strip header and trailer
-        data = barcode_data[len(STANDARD_HEADER):]
-        if data.endswith(TRAILER):
-            data = data[:-len(TRAILER)]
-
-        return data.split(DELIMITER) if data else []
+    def _quantity_to_int(value: str) -> int:
+        """Coerce a raw Q-field value to int, tolerating trailing non-digits."""
+        match = re.match(r'\d+', str(value or ''))
+        try:
+            return int(match.group(0)) if match else 0
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
-    def parse_ecia_fields(fields: List[str]) -> Dict[str, str]:
-        """Parse ECIA field identifiers and extract values.
+    def _parse_sequence(data: str, sequence: list) -> Dict[str, str]:
+        """Parse a delimiter-stripped GS1 payload against a fixed field sequence.
 
-        Args:
-            fields: List of field strings with identifiers (e.g., ['K123', 'P456', '1P789'])
+        Walks `sequence` in order. For each (identifier, field_name, required)
+        entry, checks whether the payload at `index` starts with `identifier`.
+        If so, consumes the value up to the next upcoming identifier in the
+        remainder of the sequence (or end-of-string). If the identifier isn't
+        present and the field is optional, it's skipped; required fields that
+        are missing abort the walk (the caller can fall back).
 
-        Returns:
-            Dict mapping field names to values (e.g., {'customer_order_number': '123', ...})
+        This avoids the ambiguity of "any K/P anywhere is a new field":
+        `K` is only treated as an identifier at positions where the schema
+        says `K` is the next expected field.
         """
-        barcode_fields = {}
-        field_map = BarcodeParser.ecia_field_map()
-        identifiers = sorted(field_map.keys(), key=len, reverse=True)
-        identifier_pattern = re.compile('|'.join(re.escape(identifier) for identifier in identifiers))
+        result: Dict[str, str] = {}
+        index = 0
+        n = len(data)
 
-        for field in fields:
-            text = re.sub(r'^[\x1d\x1e]+|[\x1d\x1e]+$', '', str(field or '').strip())
-            if not text:
+        for i, (identifier, field_name, required) in enumerate(sequence):
+            if index >= n:
+                break
+            if not data.startswith(identifier, index):
+                if required:
+                    # Required field missing — stop and let caller fall back.
+                    break
                 continue
 
-            index = 0
-            while index < len(text):
-                matched_identifier = None
-                for identifier in identifiers:
-                    if text.startswith(identifier, index):
-                        matched_identifier = identifier
-                        break
+            value_start = index + len(identifier)
+            # Find the earliest next identifier from the remaining schema.
+            # Only identifiers that appear *later in the sequence* are valid
+            # terminators — this is what eliminates the ambiguity.
+            value_end = n
+            for next_id, _, _ in sequence[i + 1:]:
+                pos = data.find(next_id, value_start)
+                if pos != -1 and pos < value_end:
+                    value_end = pos
 
-                if not matched_identifier:
-                    index += 1
-                    continue
+            value = data[value_start:value_end]
+            # Don't overwrite a required field that was already captured
+            # (e.g. Digi-Key SUPPLIER_PART_NUMBER from P then 30P — keep P).
+            if field_name not in result:
+                result[field_name] = value
+            index = value_end
 
-                value_start = index + len(matched_identifier)
-                remaining = text[value_start:]
-                next_match = identifier_pattern.search(remaining)
-
-                if next_match:
-                    value_end = value_start + next_match.start()
-                else:
-                    value_end = len(text)
-
-                field_name = field_map[matched_identifier]
-                barcode_fields[field_name] = text[value_start:value_end]
-                index = value_end if value_end > index else value_start
-
-        return barcode_fields
+        return result
 
     @staticmethod
-    def _extract_ecia_field_value(barcode: str, identifiers: List[str]) -> str:
-        """Extract the first matching ECIA field value from raw barcode text."""
+    def _strip_gs1_prefix(barcode: str) -> str:
+        """Remove the GS1 header and any stray GS/RS control characters."""
         data = str(barcode or '')
-        for identifier in identifiers:
-            pattern = rf'(?:^|\x1d|\x1e){re.escape(identifier)}([^\x1d\x1e]+)'
-            match = re.search(pattern, data)
-            if match:
-                return match.group(1).strip()
-        return ''
-
-    # Mouser never encodes its own catalog number in the barcode.
-    # Both `1P` and `P` identifiers carry the manufacturer PN.
-    _MOUSER_MPN_TERMINATORS = r'(?:Q\d|11K|10K|14K|4L|1V|1T|9D|10D|30P|$)'
-
-    @staticmethod
-    def _extract_mouser_mpn(data: str) -> str:
-        """Extract Mouser MPN from raw barcode body.
-
-        Mouser's P/1P field value can begin with uppercase letters (e.g. ``KTSC-21R``)
-        which the generic ECIA walker misreads as new `K` identifiers. We anchor on
-        strong downstream terminators (`Q<digit>`, `11K`, `4L`, `1V`, ...) instead.
-        """
-        match = re.search(rf'1?P([A-Za-z0-9\-/.+]+?)(?={BarcodeParser._MOUSER_MPN_TERMINATORS})', data)
-        return match.group(1) if match else ''
-
-    @staticmethod
-    def _extract_mouser_manufacturer(data: str) -> str:
-        """Extract Mouser manufacturer name from the `1V` field (until end or next token)."""
-        match = re.search(r'1V([^\x1d\x1e]+?)(?=(?:1T|Q\d|11K|4L|$))', data)
-        return match.group(1).strip() if match else ''
+        for prefix in ('[)>\x1e06\x1d', '[)>06\x1d', '[)>06'):
+            if data.startswith(prefix):
+                data = data[len(prefix):]
+                break
+        # Drop any remaining GS (0x1d) / RS (0x1e) / EOT (0x04) chars — we're
+        # parsing the delimiter-stripped form regardless of whether some
+        # survived the scanner.
+        return data.replace('\x1d', '').replace('\x1e', '').replace('\x04', '')
 
     @staticmethod
     def parse_mouser(barcode: str) -> Dict:
-        """Parse Mouser GS1-128 barcode using ISO/IEC 15434 standard.
+        """Parse Mouser GS1-128 barcode using fixed-order sequence parsing.
 
-        Format: [)>\x1e06\x1dK<id>\x1dK<field>\x1dP<mfn>\x1dQ<qty>\x1dK<invoice>...\x1e\x04
+        Mouser schema (delimiter-stripped):
+            K<cust_order> [14K<po_line>] 1P<mpn> Q<qty> [11K<pack>]
+            [10K<invoice>] [4L<country>] [1V<manufacturer>] [1T<lot>]
 
-        Mouser uses the custom order number ('K') field for both the order number
-        and the customer order number, so we set supplier_order_number to match
-        customer_order_number if not explicitly provided.
-
-        Important: Mouser QR contains ONLY manufacturer_pn, no supplier PN.
-        The P/1P identifiers both map to the MPN for Mouser.
+        Important: Mouser QR encodes only the manufacturer PN — it has no
+        Mouser-catalog part number. `1P` carries the MPN.
         """
-        result = {'supplier': 'mouser'}
+        data = BarcodeParser._strip_gs1_prefix(barcode)
+        fields = BarcodeParser._parse_sequence(data, BarcodeParser._MOUSER_SEQUENCE)
 
-        # Parse ISO/IEC 15434 format
-        fields = BarcodeParser.parse_isoiec_15434_barcode(barcode)
+        # Mouser uses `K` for both customer and supplier order number.
+        order_number = fields.get(BarcodeParser.CUSTOMER_ORDER_NUMBER, '')
+        fields.setdefault(BarcodeParser.SUPPLIER_ORDER_NUMBER, order_number)
 
-        if not fields:
-            # Fallback to regex parsing if ISO/IEC parsing fails
-            return BarcodeParser._parse_mouser_fallback(barcode)
+        mpn = fields.get(BarcodeParser.MANUFACTURER_PART_NUMBER, '')
+        quantity = BarcodeParser._quantity_to_int(fields.get(BarcodeParser.QUANTITY, ''))
 
-        # Extract ECIA fields
-        barcode_fields = BarcodeParser.parse_ecia_fields(fields)
+        raw = {'supplier': 'mouser', **fields, 'quantity': quantity}
 
-        # Mouser special case: if only customer_order_number is present,
-        # use it for supplier_order_number as well
-        if order_number := barcode_fields.get('customer_order_number'):
-            barcode_fields.setdefault('supplier_order_number', order_number)
-
-        # Mouser remap: `P` (supplier_part_number in ECIA) is actually the MPN.
-        # Re-extract MPN per-field to handle values that contain pseudo-identifiers
-        # (e.g. `P67C18-8-M-P` or `PKTSC-21R`).
-        mpn = ''
-        for field in fields:
-            text = re.sub(r'^[\x1d\x1e]+|[\x1d\x1e]+$', '', str(field or '').strip())
-            if re.match(r'1?P', text):
-                candidate = BarcodeParser._extract_mouser_mpn(text)
-                if not candidate:
-                    # Delimiter-split field: whole remainder after 1P/P is the MPN.
-                    candidate = re.sub(r'^1?P', '', text)
-                if candidate:
-                    mpn = candidate
-                    break
-        if not mpn:
-            mpn = (
-                barcode_fields.get('manufacturer_part_number', '')
-                or barcode_fields.get('supplier_part_number', '')
-            )
-
-        result.update(barcode_fields)
-
-        normalized = {
+        return {
             'supplier': 'mouser',
             'barcode': mpn,
             'supplier_pn': '',  # Mouser QR does NOT include supplier PN
             'manufacturer_pn': mpn,
-            'quantity': int(result.get('quantity', 0)) if result.get('quantity') else 0,
-            'order_number': result.get('supplier_order_number', '') or result.get('customer_order_number', ''),
-            'supplier_order_number': result.get('supplier_order_number', ''),
-            'customer_order_number': result.get('customer_order_number', ''),
-            'manufacturer': result.get('manufacturer', ''),
-            'raw_data': result
-        }
-
-        return normalized
-
-    @staticmethod
-    def _parse_mouser_fallback(barcode: str) -> Dict:
-        """Fallback parser for Mouser when delimiters are absent.
-
-        Uses strong downstream terminators to extract the MPN, which can begin
-        with letters (e.g. ``KTSC-21R``) that the generic ECIA walker would
-        misread as new ``K`` identifiers.
-        """
-        result = {'supplier': 'mouser'}
-
-        # Remove GS1 prefix
-        data = barcode[5:] if barcode.startswith('[)>06') else barcode
-
-        mpn = BarcodeParser._extract_mouser_mpn(data)
-        manufacturer = BarcodeParser._extract_mouser_manufacturer(data)
-
-        # Order number: leading K<digits> before the next 14K / 4K / 1K / P boundary.
-        order_match = re.search(r'^K(\d+?)(?=(?:14K|4K|1K|1?P|$))', data)
-        order_number = order_match.group(1) if order_match else ''
-
-        quantity = BarcodeParser._extract_compact_quantity(data)
-
-        result['manufacturer_part_number'] = mpn
-        result['manufacturer'] = manufacturer
-        result['quantity'] = quantity
-        if order_number:
-            result['customer_order_number'] = order_number
-            result['supplier_order_number'] = order_number
-
-        normalized = {
-            'supplier': 'mouser',
-            'barcode': mpn,
-            'supplier_pn': '',
-            'manufacturer_pn': mpn,
-            'quantity': int(quantity) if quantity else 0,
+            'quantity': quantity,
             'order_number': order_number,
             'supplier_order_number': order_number,
             'customer_order_number': order_number,
-            'manufacturer': manufacturer,
-            'raw_data': result,
+            'manufacturer': fields.get(BarcodeParser.MANUFACTURER, '').strip(),
+            'raw_data': raw,
         }
-
-        return normalized
 
     @staticmethod
     def parse_digikey(barcode: str) -> Dict:
-        """Parse Digi-Key GS1-128 barcode using ISO/IEC 15434 standard.
+        """Parse Digi-Key GS1-128 barcode using fixed-order sequence parsing.
 
-        Format: [)>\x1e06\x1dP<digikey_id>\x1d1P<mfn>\x1dQ<qty>\x1d...
+        Digi-Key schema (delimiter-stripped):
+            P<dk_pn>-ND 1P<mpn> [30P<dk_pn>-ND] [K<cust_order>]
+            [1K<sales_order>] [10K<invoice>] [9D<date>] [1T<lot>]
+            [11K<pack>] [4L<country>] [Q<qty>] [11Z<pick>]
 
-        Digi-Key part numbers have -ND suffix and are included in the QR.
-        Includes both supplier_pn (Digi-Key ID) and manufacturer_pn.
+        Fixed-order walking eliminates the ambiguity caused by stripped GS
+        delimiters: an MPN ending in `-P` is no longer misread as a new `P`
+        field, and an MPN containing `K` is no longer misread as a new `K`
+        field, because each identifier is only searched for at the position
+        where the schema expects it.
         """
-        result = {'supplier': 'digikey'}
+        data = BarcodeParser._strip_gs1_prefix(barcode)
+        fields = BarcodeParser._parse_sequence(data, BarcodeParser._DIGIKEY_SEQUENCE)
+        fields.pop('_trailer', None)
 
-        # Parse ISO/IEC 15434 format
-        fields = BarcodeParser.parse_isoiec_15434_barcode(barcode)
+        supplier_pn = fields.get(BarcodeParser.SUPPLIER_PART_NUMBER, '')
+        manufacturer_pn = fields.get(BarcodeParser.MANUFACTURER_PART_NUMBER, '')
+        customer_order = fields.get(BarcodeParser.CUSTOMER_ORDER_NUMBER, '')
+        supplier_order = fields.get(BarcodeParser.SUPPLIER_ORDER_NUMBER, '') or customer_order
 
-        if not fields:
-            # Fallback to regex parsing if ISO/IEC parsing fails
-            return BarcodeParser._parse_digikey_fallback(barcode)
+        quantity = BarcodeParser._quantity_to_int(fields.get(BarcodeParser.QUANTITY, ''))
 
-        # Extract ECIA fields
-        barcode_fields = BarcodeParser.parse_ecia_fields(fields)
-        result.update(barcode_fields)
+        raw = {'supplier': 'digikey', **fields, 'quantity': quantity}
 
-        # Always include supplier_order_number from 1K/K field if present
-        supplier_order_number = result.get('supplier_order_number', '')
-        if not supplier_order_number:
-            # Try to extract from ECIA fields if missing
-            supplier_order_number = result.get('customer_order_number', '')
-
-        supplier_part_number = result.get('supplier_part_number', '') or result.get('customer_order_number', '')
-
-        normalized = {
+        return {
             'supplier': 'digikey',
-            'barcode': result.get('manufacturer_part_number', '') or supplier_part_number,
-            'supplier_pn': supplier_part_number,
-            'digikey_pn': supplier_part_number,
-            'manufacturer_pn': result.get('manufacturer_part_number', ''),
-            'quantity': int(result.get('quantity', 0)) if result.get('quantity') else 0,
-            'order_number': supplier_order_number or result.get('customer_order_number', ''),
-            'supplier_order_number': supplier_order_number,
-            'customer_order_number': result.get('customer_order_number', ''),
-            'raw_data': result
+            'barcode': manufacturer_pn or supplier_pn,
+            'supplier_pn': supplier_pn,
+            'digikey_pn': supplier_pn,
+            'manufacturer_pn': manufacturer_pn,
+            'quantity': quantity,
+            'order_number': supplier_order,
+            'supplier_order_number': supplier_order,
+            'customer_order_number': customer_order,
+            'raw_data': raw,
         }
-
-        return normalized
-
-    @staticmethod
-    def _parse_digikey_fallback(barcode: str) -> Dict:
-        """Fallback regex-based parser for Digi-Key if ISO/IEC 15434 parsing fails.
-
-        This provides robustness against non-standard barcode formats.
-        """
-        result = {'supplier': 'digikey'}
-
-        # Remove GS1 prefix
-        data = barcode[5:] if barcode.startswith('[)>06') else barcode
-
-        barcode_fields = BarcodeParser.parse_ecia_fields([data])
-        order_number = (
-            barcode_fields.get('supplier_order_number')
-            or barcode_fields.get('customer_order_number')
-            or ''
-        )
-
-        result.update(barcode_fields)
-
-        # Digi-Key part number: P followed by alphanumerics ending with -ND
-        dk_pn_match = re.search(r'P([A-Z0-9]{2,}-ND)', data)
-        if dk_pn_match:
-            result['supplier_part_number'] = dk_pn_match.group(1)
-            result['digikey_pn'] = dk_pn_match.group(1)
-
-        # Manufacturer PN: preserve terminal '-P' before next ECIA token.
-        mfn_match = re.search(r'1P([A-Z0-9\-]+?-P)(?=(?:30P|1K|10K|11K|4L|1V|Q|$))', data)
-        if mfn_match:
-            result['manufacturer_part_number'] = mfn_match.group(1)
-
-        result['quantity'] = BarcodeParser._extract_compact_quantity(data)
-        if order_number:
-            result['supplier_order_number'] = order_number
-            result['customer_order_number'] = order_number
-
-        normalized = {
-            'supplier': 'digikey',
-            'barcode': result.get('manufacturer_part_number', '') or result.get('supplier_part_number', ''),
-            'supplier_pn': result.get('supplier_part_number', ''),
-            'digikey_pn': result.get('supplier_part_number', ''),
-            'manufacturer_pn': result.get('manufacturer_part_number', ''),
-            'quantity': int(result.get('quantity', 0)) if result.get('quantity') else 0,
-            'order_number': result.get('supplier_order_number', '') or result.get('customer_order_number', ''),
-            'supplier_order_number': result.get('supplier_order_number', ''),
-            'customer_order_number': result.get('customer_order_number', ''),
-            'raw_data': result
-        }
-
-        return normalized
 
     @classmethod
     def parse(cls, barcode: str) -> Dict:
@@ -641,7 +487,7 @@ def main() -> None:
         result = parser.parse(barcode)
         print(f"\n{supplier_name}:")
         print(f"  Barcode (API lookup): {result.get('barcode', '(none)')}")
-        print(f"  Supplier PN: {result.get('supplier_pn', '(none)')}")
+        print(f"  Part: {result.get('supplier_pn', '(none)')}")
         print(f"  Manufacturer PN: {result.get('manufacturer_pn', '(none)')}")
         print(f"  Quantity: {result.get('quantity', 0)}")
 
