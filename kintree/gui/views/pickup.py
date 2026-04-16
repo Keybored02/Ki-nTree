@@ -41,41 +41,50 @@ class PickupItem:
 
 class GuidedPickupModal:
     """
-    Two-page modal for guided OUT (pickup) flow.
+    Two-page modal for guided OUT (pickup) and IN (put-down) flow.
 
-    Page 0 — location overview:
-        • Table grouped by location (location column first).
-        • Scanner input resolves InvenTree location barcodes.
-        • Scanning a location navigates to page 1.
+    Page 0 — overview table grouped by location:
+        OUT: input resolves location barcodes only.
+        IN:  input resolves both part *and* location barcodes; a part scan
+             jumps directly to the location that part belongs to.
 
-    Page 1 — part scanning for one location:
-        • Shows only the parts belonging to the scanned location.
-        • Scanner input resolves part barcodes via _find_part_by_lookup.
-        • Matched parts turn green; once all are scanned, auto-returns to page 0.
-        • Back arrow and manual tick also available.
+    Page 1 — per-location detail:
+        OUT: input resolves part barcodes only.
+        IN:  input resolves part barcodes; a location barcode also navigates.
     """
 
+    MODE_OUT = 'out'
+    MODE_IN  = 'in'
+
     def __init__(self, page: ft.Page, items: List[PickupItem],
-                 find_part_fn, on_close_fn):
+                 find_part_fn, on_close_fn, mode: str = 'out'):
         """
         Parameters
         ----------
         page            Flet page reference.
         items           Full list of PickupItems from the BOM resolve.
-        find_part_fn    Callable(lookup_value) -> Optional[dict]  (from BarcodeApiMixin)
+        find_part_fn    Callable(lookup_value) -> Optional[dict]
         on_close_fn     Called when the modal closes; receives list of PickupItems.
+        mode            'out' (pickup) or 'in' (put-down).
         """
         self._page = page
         self._items = items
         self._find_part = find_part_fn
         self._on_close = on_close_fn
+        self._mode = mode
         self._current_location: Optional[str] = None
+        self._current_part_pk: Optional[int] = None  # IN mode: part scanned first
         self._parent_filter: Optional[str] = None   # set when a parent location was scanned
         self._scan_lock = threading.Lock()
 
         # Build controls
+        _input_hint = (
+            'Scan part or location barcode…'
+            if mode == self.MODE_IN else
+            'Scan location barcode…'
+        )
         self._scanner_input = ft.TextField(
-            hint_text='Scan location or part barcode…',
+            hint_text=_input_hint,
             prefix_icon=ft.icons.QR_CODE_SCANNER,
             dense=True,
             autofocus=True,
@@ -104,8 +113,13 @@ class GuidedPickupModal:
             on_click=lambda e: self._go_page0(),
             visible=False,
         )
+        _p0_hint = (
+            'Scan a part or location barcode to begin'
+            if mode == self.MODE_IN else
+            'Scan a location barcode to begin'
+        )
         self._page0_header = ft.Text(
-            'Scan a location barcode to begin',
+            _p0_hint,
             style=ft.TextThemeStyle.TITLE_MEDIUM,
         )
         self._page0_content = ft.Column(
@@ -185,6 +199,56 @@ class GuidedPickupModal:
             visible=False,
         )
 
+        # Page 1b — IN mode: part scanned first, confirm by scanning destination location
+        self._part_header = ft.Text(
+            '',
+            style=ft.TextThemeStyle.HEADLINE_SMALL,
+            text_align=ft.TextAlign.CENTER,
+            weight=ft.FontWeight.BOLD,
+        )
+        self._location_list_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text('Put here')),
+                ft.DataColumn(ft.Text('Qty')),
+                ft.DataColumn(ft.Text('✓')),
+            ],
+            rows=[],
+            column_spacing=14,
+            horizontal_margin=8,
+            show_bottom_border=True,
+        )
+        self._page1b_content = ft.Column(
+            controls=[
+                ft.Row(
+                    controls=[
+                        ft.IconButton(
+                            icon=ft.icons.ARROW_BACK,
+                            tooltip='Back to overview',
+                            on_click=lambda e: self._go_page0(),
+                        ),
+                        ft.Container(
+                            content=self._part_header,
+                            expand=True,
+                            alignment=ft.alignment.center,
+                        ),
+                        ft.Container(width=48),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Container(
+                    content=ft.ListView(
+                        controls=[self._location_list_table],
+                        expand=True,
+                    ),
+                    expand=True,
+                    height=420,
+                ),
+            ],
+            spacing=8,
+            expand=True,
+            visible=False,
+        )
+
         # Close button
         self._close_btn = ft.TextButton(
             'Close',
@@ -200,11 +264,12 @@ class GuidedPickupModal:
             color='grey',
         )
 
+        _title = 'Guided Put-Down — IN' if mode == self.MODE_IN else 'Guided Pickup — OUT'
         self._dialog = ft.AlertDialog(
             modal=True,
             title=ft.Row(
                 controls=[
-                    ft.Text('Guided Pickup — OUT', expand=True),
+                    ft.Text(_title, expand=True),
                     self._counter_text,
                 ],
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -217,6 +282,7 @@ class GuidedPickupModal:
                         ft.Divider(height=6),
                         self._page0_content,
                         self._page1_content,
+                        self._page1b_content,
                     ],
                     spacing=6,
                     expand=True,
@@ -250,11 +316,21 @@ class GuidedPickupModal:
 
     def _go_page0(self):
         self._current_location = None
+        self._current_part_pk = None
         self._parent_filter = None
         self._page0_content.visible = True
         self._page1_content.visible = False
-        self._scanner_input.hint_text = 'Scan location or part barcode…'
-        self._page0_header.value = 'Scan a location barcode to begin'
+        self._page1b_content.visible = False
+        self._scanner_input.hint_text = (
+            'Scan part or location barcode…'
+            if self._mode == self.MODE_IN else
+            'Scan location barcode…'
+        )
+        self._page0_header.value = (
+            'Scan a part or location barcode to begin'
+            if self._mode == self.MODE_IN else
+            'Scan a location barcode to begin'
+        )
         self._page0_header.style = ft.TextThemeStyle.TITLE_MEDIUM
         self._page0_header.weight = ft.FontWeight.NORMAL
         self._page0_header.text_align = ft.TextAlign.LEFT
@@ -265,6 +341,7 @@ class GuidedPickupModal:
         try:
             self._page0_content.update()
             self._page1_content.update()
+            self._page1b_content.update()
             self._scanner_input.update()
         except Exception:
             pass
@@ -273,8 +350,10 @@ class GuidedPickupModal:
         """Filter page 0 to show only child locations of *parent_name*."""
         self._parent_filter = parent_name
         self._current_location = None
+        self._current_part_pk = None
         self._page0_content.visible = True
         self._page1_content.visible = False
+        self._page1b_content.visible = False
         self._scanner_input.hint_text = 'Scan a child location barcode…'
         self._page0_header.value = parent_name
         self._page0_header.style = ft.TextThemeStyle.HEADLINE_SMALL
@@ -293,18 +372,47 @@ class GuidedPickupModal:
 
     def _go_page1(self, location: str):
         self._current_location = location
+        self._current_part_pk = None
         # Show only the leaf segment (last part after the final '/')
         self._location_header.value = location.rsplit('/', 1)[-1]
         self._page0_content.visible = False
         self._page1_content.visible = True
-        self._scanner_input.hint_text = 'Scan a part barcode…'
+        self._page1b_content.visible = False
+        self._scanner_input.hint_text = (
+            'Scan a part barcode…'
+            if self._mode == self.MODE_OUT else
+            'Scan part or location barcode…'
+        )
+        verb = 'pick up' if self._mode == self.MODE_OUT else 'put down'
         self._rebuild_part_table()
-        self._set_status('Scan parts from this location.', color='grey')
+        self._set_status(f'Scan parts to {verb} from this location.', color='grey')
         self._focus_input()
         try:
             self._page0_content.update()
             self._page1_content.update()
+            self._page1b_content.update()
             self._location_header.update()
+            self._scanner_input.update()
+        except Exception:
+            pass
+
+    def _go_page1b(self, part_pk: int, part_name: str):
+        """IN mode: part scanned first — show destination locations, confirm by scanning one."""
+        self._current_part_pk = part_pk
+        self._current_location = None
+        self._part_header.value = part_name
+        self._page0_content.visible = False
+        self._page1_content.visible = False
+        self._page1b_content.visible = True
+        self._scanner_input.hint_text = 'Scan destination location barcode…'
+        self._rebuild_location_list_table()
+        self._set_status('Scan the location where you are putting this part.', color='grey')
+        self._focus_input()
+        try:
+            self._page0_content.update()
+            self._page1_content.update()
+            self._page1b_content.update()
+            self._part_header.update()
             self._scanner_input.update()
         except Exception:
             pass
@@ -345,8 +453,25 @@ class GuidedPickupModal:
         self._dispatch_scan(raw)
 
     def _dispatch_scan(self, raw: str):
-        """Route a completed scan string to location or part resolution."""
-        if self._current_location is None:
+        """Route a completed scan string to the appropriate resolver.
+
+        OUT mode:
+          • Page 0 → location only.
+          • Page 1 → part only.
+
+        IN mode:
+          • Page 0 → try part first (jumps to that part's location),
+                      fall back to location if part lookup fails.
+          • Page 1 → try part first; if it resolves to a *different*
+                      location, navigate there instead.
+        """
+        if self._mode == self.MODE_IN:
+            threading.Thread(
+                target=self._resolve_scan_in,
+                args=(raw,),
+                daemon=True,
+            ).start()
+        elif self._current_location is None:
             threading.Thread(
                 target=self._resolve_location_scan,
                 args=(raw,),
@@ -500,7 +625,8 @@ class GuidedPickupModal:
         # All done for this location? Auto-return to page 0.
         remaining = [it for it in loc_items if not it.scanned and not it.checked]
         if not remaining:
-            self._set_status(f'All parts picked for {self._current_location}!', color='green')
+            verb = 'put down at' if self._mode == self.MODE_IN else 'picked for'
+            self._set_status(f'All parts {verb} {self._current_location}!', color='green')
             try:
                 self._status_text.update()
             except Exception:
@@ -509,6 +635,176 @@ class GuidedPickupModal:
             self._go_page0()
         else:
             self._focus_input()
+
+    def _resolve_scan_in(self, raw: str):
+        """IN-mode unified resolver: tries part lookup first, then location.
+
+        Page 0 / page 1b:
+          • Part scan → go to page 1b (part name big, list destination locations,
+            confirm by scanning a location).
+        Page 1b:
+          • Location scan → confirm that location for the current part.
+        Page 1 (location-first path, reached via location scan on page 0):
+          • Part scan → mark part done in that location.
+          • Location scan → navigate to that location.
+        """
+        # ---- On page 1b: expect a location confirmation scan ----
+        if self._current_part_pk is not None:
+            self._resolve_location_confirm_in(raw)
+            return
+
+        # ---- Try part lookup (works on page 0 and page 1) ----
+        parsed = _parser.parse(raw)
+        supplier = parsed.get('supplier', 'unknown')
+        if supplier == 'unknown':
+            lookup_candidates = [raw.strip()]
+        else:
+            mpn = str(parsed.get('manufacturer_pn') or '').strip()
+            spn = str(parsed.get('supplier_pn') or '').strip()
+            lookup_candidates = [v for v in [mpn, spn] if v] or [raw.strip()]
+
+        found_pk = 0
+        found_name = ''
+        for candidate in lookup_candidates:
+            result = self._find_part(candidate)
+            if result:
+                found_pk = int(result.get('pk') or result.get('id') or 0)
+                found_name = str(result.get('name') or result.get('IPN') or candidate)
+                if found_pk:
+                    break
+
+        # Also try exact name/IPN match against all BOM items
+        if not found_pk:
+            for candidate in lookup_candidates:
+                cand_lower = candidate.lower()
+                for item in self._items:
+                    if item.part_name.lower() == cand_lower:
+                        found_pk = item.part_pk
+                        found_name = item.part_name
+                        break
+                if found_pk:
+                    break
+
+        if found_pk:
+            matched_items = [it for it in self._items if it.part_pk == found_pk]
+            if not matched_items:
+                self._set_status(f'Part not in this BOM: {raw}', color='orange')
+                self._focus_input()
+                return
+
+            # On page 1 (location-first path): mark done if part belongs here
+            if self._current_location is not None:
+                loc_match = next(
+                    (it for it in matched_items if it.location == self._current_location),
+                    None,
+                )
+                if loc_match:
+                    with self._scan_lock:
+                        loc_match.scanned = True
+                    self._set_status(f'✓ {loc_match.part_name}', color='green')
+                    self._refresh_counter()
+                    self._rebuild_part_table()
+                    loc_items = [it for it in self._items if it.location == self._current_location]
+                    remaining = [it for it in loc_items if not it.scanned and not it.checked]
+                    if not remaining:
+                        self._set_status(f'All parts put down at {self._current_location}!', color='green')
+                        try:
+                            self._status_text.update()
+                        except Exception:
+                            pass
+                        import time; time.sleep(1.2)
+                        self._go_page0()
+                    else:
+                        self._focus_input()
+                    return
+                # Part belongs elsewhere; switch to page 1b for it
+                if not found_name:
+                    found_name = matched_items[0].part_name
+                self._go_page1b(found_pk, found_name)
+                return
+
+            # On page 0: go to page 1b — show destination locations, wait for location scan
+            if not found_name:
+                found_name = matched_items[0].part_name
+            self._go_page1b(found_pk, found_name)
+            return
+
+        # ---- No part matched: try as a location barcode ----
+        self._resolve_location_scan(raw)
+
+    def _confirm_location_in(self, item: PickupItem):
+        """Mark *item* done via a tap on its location row (page 1b)."""
+        with self._scan_lock:
+            item.scanned = True
+        self._set_status(f'✓ {item.location.rsplit("/", 1)[-1]}', color='green')
+        self._refresh_counter()
+        self._rebuild_location_list_table()
+        part_items = [it for it in self._items if it.part_pk == self._current_part_pk]
+        remaining = [it for it in part_items if not it.scanned and not it.checked]
+        if not remaining:
+            try:
+                self._status_text.update()
+            except Exception:
+                pass
+            import time; time.sleep(1.2)
+            self._go_page0()
+        else:
+            self._focus_input()
+
+    def _resolve_location_confirm_in(self, raw: str):
+        """Page-1b: resolve *raw* as a location and mark the matching part-item done."""
+        api = get_inventree_api()
+        location_name = None
+
+        if api:
+            try:
+                result = api.post('barcode/', data={'barcode': raw})
+                if isinstance(result, dict):
+                    loc = result.get('stocklocation')
+                    if loc:
+                        loc_pk = loc.get('pk') or loc.get('id')
+                        if loc_pk:
+                            loc_obj = api.get(f'stock/location/{loc_pk}/')
+                            if isinstance(loc_obj, dict):
+                                location_name = (
+                                    loc_obj.get('pathstring')
+                                    or loc_obj.get('name')
+                                    or str(loc_pk)
+                                )
+            except Exception:
+                pass
+
+        # Fallback: match raw against locations of the current part's items
+        if not location_name:
+            part_locs = {it.location for it in self._items if it.part_pk == self._current_part_pk}
+            raw_lower = raw.strip().lower()
+            for candidate in part_locs:
+                if candidate.lower() == raw_lower or candidate.rsplit('/', 1)[-1].lower() == raw_lower:
+                    location_name = candidate
+                    break
+
+        if not location_name:
+            self._set_status(f'Location not recognised: {raw}', color='orange')
+            self._focus_input()
+            return
+
+        # Find the matching item for this part + location
+        part_items = [it for it in self._items if it.part_pk == self._current_part_pk]
+        target = next((it for it in part_items if it.location == location_name), None)
+
+        # Also try prefix/suffix match (pathstring may differ in trailing detail)
+        if not target:
+            for it in part_items:
+                if it.location.lower().endswith(location_name.lower()) or location_name.lower().endswith(it.location.lower()):
+                    target = it
+                    break
+
+        if not target:
+            self._set_status(f'Location not in destination list: {location_name}', color='orange')
+            self._focus_input()
+            return
+
+        self._confirm_location_in(target)
 
     # ------------------------------------------------------------------ #
     #  Table builders                                                      #
@@ -575,6 +871,39 @@ class GuidedPickupModal:
         except Exception:
             pass
 
+    def _rebuild_location_list_table(self):
+        """Rebuild page-1b table: destination locations for the current part (IN mode)."""
+        part_items = [it for it in self._items if it.part_pk == self._current_part_pk]
+        rows = []
+        for item in part_items:
+            done = item.scanned or item.checked
+            qty_str = str(int(item.quantity)) if item.quantity == int(item.quantity) else str(item.quantity)
+            loc_leaf = item.location.rsplit('/', 1)[-1]
+            rows.append(ft.DataRow(
+                cells=[
+                    ft.DataCell(ft.TextButton(
+                        text=loc_leaf,
+                        tooltip=item.location,
+                        style=ft.ButtonStyle(
+                            color='green' if done else ft.colors.PRIMARY,
+                            padding=ft.padding.all(0),
+                        ),
+                        on_click=lambda e, it=item: self._confirm_location_in(it),
+                    )),
+                    ft.DataCell(ft.Text(qty_str, size=12)),
+                    ft.DataCell(ft.Checkbox(
+                        value=done,
+                        on_change=lambda e, it=item: self._on_manual_tick(e, it),
+                    )),
+                ],
+                color=ft.colors.GREEN_50 if done else None,
+            ))
+        self._location_list_table.rows = rows
+        try:
+            self._location_list_table.update()
+        except Exception:
+            pass
+
     def _rebuild_part_table(self):
         """Rebuild page-1 table for the current location."""
         loc_items = [it for it in self._items if it.location == self._current_location]
@@ -614,8 +943,16 @@ class GuidedPickupModal:
 
         self._refresh_counter()
 
-        # Refresh whichever page is visible
-        if self._current_location is not None:
+        if self._current_part_pk is not None:
+            # Page 1b — IN mode, location-confirm view
+            self._rebuild_location_list_table()
+            part_items = [it for it in self._items if it.part_pk == self._current_part_pk]
+            remaining = [it for it in part_items if not it.scanned and not it.checked]
+            if not remaining:
+                import time; time.sleep(0.6)
+                self._go_page0()
+        elif self._current_location is not None:
+            # Page 1 — part scanning view
             self._rebuild_part_table()
             loc_items = [it for it in self._items if it.location == self._current_location]
             remaining = [it for it in loc_items if not it.scanned and not it.checked]
@@ -634,11 +971,12 @@ class GuidedPickupModal:
     def _on_close_click(self, e):
         incomplete = [it for it in self._items if not it.scanned and not it.checked]
         if incomplete:
+            verb = 'put down' if self._mode == self.MODE_IN else 'picked'
             # Swap close button to a confirm-anyway button
             self._close_btn.text = f'Close anyway ({len(incomplete)} item(s) remaining)'
             self._close_btn.icon = ft.icons.WARNING_AMBER_ROUNDED
             self._close_btn.icon_color = 'orange'
-            self._status_text.value = f'Warning: {len(incomplete)} item(s) not yet picked.'
+            self._status_text.value = f'Warning: {len(incomplete)} item(s) not yet {verb}.'
             self._status_text.color = 'orange'
             self._close_btn.on_click = self._force_close
             try:
@@ -900,7 +1238,7 @@ class PickupView(MainView):
             self._set_status(message, color='green' if ok else 'red')
 
             # Auto-open guided modal if enabled and load succeeded
-            if ok and items and self.fields['guided_mode'].value and self._mode == self.MODE_OUT:
+            if ok and items and self.fields['guided_mode'].value:
                 self._open_guided_modal()
 
         self._search_thread = threading.Thread(target=_run, daemon=True)
@@ -931,7 +1269,7 @@ class PickupView(MainView):
             pass
 
     def _on_confirm(self, e):
-        if self.fields['guided_mode'].value and self._mode == self.MODE_OUT:
+        if self.fields['guided_mode'].value:
             self._open_guided_modal()
             return
         checked = [it for it in self._items if it.checked]
@@ -968,6 +1306,7 @@ class PickupView(MainView):
             items=self._items,
             find_part_fn=self._find_part_by_lookup_simple,
             on_close_fn=self._on_guided_close,
+            mode=self._mode,
         )
         self._guided_modal.open()
 
@@ -976,8 +1315,9 @@ class PickupView(MainView):
         self._items = items
         self._rebuild_table()
         done = sum(1 for it in items if it.scanned or it.checked)
+        verb = 'put down' if self._mode == self.MODE_IN else 'picked'
         self._set_status(
-            f'Guided session complete: {done}/{len(items)} item(s) picked.',
+            f'Guided session complete: {done}/{len(items)} item(s) {verb}.',
             color='green' if done == len(items) else 'orange',
         )
 
