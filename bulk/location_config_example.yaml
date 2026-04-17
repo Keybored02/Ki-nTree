@@ -1,5 +1,5 @@
 # Example configuration for bulk creating nested stock locations
-# 
+#
 # This creates a hierarchy like:
 #   RACK-01/
 #     RACK-01/SHELF-01/

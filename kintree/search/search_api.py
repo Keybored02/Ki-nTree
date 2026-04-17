@@ -1,11 +1,12 @@
 import os
 import time
 
-from ..config import settings, config_interface
+from ..config import config_interface
+from ..config import settings
 
 
 def load_from_file(search_file, test_mode=False) -> dict:
-    ''' Fetch part data from file '''
+    """Fetch part data from file"""
     cache_valid = settings.CACHE_VALID_DAYS * 24 * 3600
 
     # Load data from file if cache enabled
@@ -18,7 +19,7 @@ def load_from_file(search_file, test_mode=False) -> dict:
         # Check cache validity
         try:
             # Get timestamp
-            timestamp = int(time.time() - part_data['search_timestamp'])
+            timestamp = int(time.time() - part_data["search_timestamp"])
         except (KeyError, TypeError):
             timestamp = int(time.time())
 
@@ -29,7 +30,7 @@ def load_from_file(search_file, test_mode=False) -> dict:
 
 
 def save_to_file(part_info, search_file, update_ts=True):
-    ''' Save part data to file '''
+    """Save part data to file"""
 
     # Check if search/results directory needs to be created
     if not os.path.exists(os.path.dirname(search_file)):
@@ -37,7 +38,7 @@ def save_to_file(part_info, search_file, update_ts=True):
 
     if update_ts:
         # Update timestamp
-        part_info['search_timestamp'] = int(time.time())
+        part_info["search_timestamp"] = int(time.time())
 
     # Save data if cache enabled
     if settings.CACHE_ENABLED:

@@ -1,34 +1,34 @@
 from enum import Enum
-from typing import Optional, List
+from typing import List, Optional
 
 import flet as ft
 
 GUI_PARAMS = {
-    'nav_rail_min_width': 100,
-    'nav_rail_width': 400,
-    'nav_rail_alignment': -0.9,
-    'nav_rail_icon_size': 40,
-    'nav_rail_text_size': 16,
-    'nav_rail_padding': 10,
-    'textfield_width': 600,
-    'textfield_dense': True,
-    'textfield_space_after': 3,
-    'dropdown_width': 600,
-    'dropdown_dense': False,
-    'searchfield_width': 300,
-    'button_width': 110,
-    'button_height': 56,
-    'icon_size': 40,
-    'text_size': 16,
+    "nav_rail_min_width": 100,
+    "nav_rail_width": 400,
+    "nav_rail_alignment": -0.9,
+    "nav_rail_icon_size": 40,
+    "nav_rail_text_size": 16,
+    "nav_rail_padding": 10,
+    "textfield_width": 600,
+    "textfield_dense": True,
+    "textfield_space_after": 3,
+    "dropdown_width": 600,
+    "dropdown_dense": False,
+    "searchfield_width": 300,
+    "button_width": 110,
+    "button_height": 56,
+    "icon_size": 40,
+    "text_size": 16,
 }
 # Contains data from all views
 data_from_views = {}
 
 
 class DialogType(Enum):
-    VALID = 'valid'
-    WARNING = 'warning'
-    ERROR = 'error'
+    VALID = "valid"
+    WARNING = "warning"
+    ERROR = "error"
 
 
 def handle_transition(page: ft.Page, transition: bool, update_page=False, timeout=0):
@@ -50,6 +50,7 @@ def handle_transition(page: ft.Page, transition: bool, update_page=False, timeou
     # Wait
     if timeout:
         import time
+
         time.sleep(timeout)
 
     # Update
@@ -57,7 +58,7 @@ def handle_transition(page: ft.Page, transition: bool, update_page=False, timeou
         page.update()
 
 
-def update_theme(page: ft.Page, mode='light', transition=False, compact=True):
+def update_theme(page: ft.Page, mode="light", transition=False, compact=True):
     # Color theme
     page.theme_mode = mode
 
@@ -76,7 +77,7 @@ def update_theme(page: ft.Page, mode='light', transition=False, compact=True):
 
 
 class CommonView(ft.View):
-    '''Common view to all GUI views'''
+    """Common view to all GUI views"""
 
     _page = None
     navigation_rail = None
@@ -85,7 +86,7 @@ class CommonView(ft.View):
     fields = None
     data = None
     dialog = None
-    
+
     def __init__(self, page: ft.Page, appbar: ft.AppBar, navigation_rail: ft.NavigationRail):
         # Store page pointer
         self._page = page
@@ -119,7 +120,7 @@ class CommonView(ft.View):
 
     def build_dialog(self):
         return None
-    
+
     def build_snackbar(self, d_type: DialogType, message: str):
         if d_type == DialogType.VALID:
             self.dialog = ft.SnackBar(
@@ -127,7 +128,7 @@ class CommonView(ft.View):
                 content=ft.Text(
                     message,
                     color=ft.colors.GREEN_700,
-                    size=GUI_PARAMS['nav_rail_text_size'],
+                    size=GUI_PARAMS["nav_rail_text_size"],
                     weight=ft.FontWeight.BOLD,
                 ),
             )
@@ -137,7 +138,7 @@ class CommonView(ft.View):
                 content=ft.Text(
                     message,
                     color=ft.colors.AMBER_800,
-                    size=GUI_PARAMS['nav_rail_text_size'],
+                    size=GUI_PARAMS["nav_rail_text_size"],
                     weight=ft.FontWeight.BOLD,
                 ),
             )
@@ -147,17 +148,17 @@ class CommonView(ft.View):
                 content=ft.Text(
                     message,
                     color=ft.colors.RED_700,
-                    size=GUI_PARAMS['nav_rail_text_size'],
+                    size=GUI_PARAMS["nav_rail_text_size"],
                     weight=ft.FontWeight.BOLD,
                 ),
             )
 
     def show_dialog(
-            self,
-            d_type: Optional[DialogType] = None,
-            message: Optional[str] = None,
-            snackbar=True,
-            open=True,
+        self,
+        d_type: Optional[DialogType] = None,
+        message: Optional[str] = None,
+        snackbar=True,
+        open=True,
     ):
         if snackbar:
             self.build_snackbar(d_type, message)
@@ -176,10 +177,10 @@ class CommonView(ft.View):
 
 
 class SwitchWithRefs(ft.Switch):
-    '''Link the visibility of other fields to a switch value'''
+    """Link the visibility of other fields to a switch value"""
 
     linked_refs = []
-    
+
     def __init__(
         self,
         refs: List[ft.Ref] = None,
@@ -202,10 +203,10 @@ class SwitchWithRefs(ft.Switch):
             except AssertionError:
                 # Control not added to page yet
                 pass
-    
+
     def process_change(self, e, handler, *args, **kwargs):
         enable = False
-        if e.data == 'true':
+        if e.data == "true":
             enable = True
         self.enable_refs(enable)
         handler(e, *args, **kwargs)
@@ -213,7 +214,7 @@ class SwitchWithRefs(ft.Switch):
     @property
     def refs(self):
         return self.linked_refs
-    
+
     @refs.setter
     def refs(self, references: List[ft.Ref]):
         if references:
@@ -221,9 +222,11 @@ class SwitchWithRefs(ft.Switch):
             for ref in references:
                 try:
                     if ref.current is None:
-                        raise Exception(f'Reference "{ref.current}" needs to be added to the page first')
-                except AttributeError:
-                    raise Exception(f'"{ref}" is not a Flet Ref (type: {type(ref)})')
+                        raise Exception(
+                            f'Reference "{ref.current}" needs to be added to the page first'
+                        )
+                except AttributeError as err:
+                    raise Exception(f'"{ref}" is not a Flet Ref (type: {type(ref)})') from err
                 # if ft.Control not in ref.current.__class__.__mro__:
                 #     raise Exception(f'"{ref.current}" is not a Flet Control ({type(ref.current)})')
                 self.linked_refs.append(ref)
@@ -232,30 +235,31 @@ class SwitchWithRefs(ft.Switch):
 
     @ft.Switch.on_change.setter
     def on_change(self, handler, *args, **kwargs):
-        ft.Switch.on_change.fset(
-            self,
-            lambda e: self.process_change(e, handler, *args, **kwargs)
-        )
+        ft.Switch.on_change.fset(self, lambda e: self.process_change(e, handler, *args, **kwargs))
 
 
 class DropdownWithSearch(ft.UserControl):
-    '''Implements a dropdown with search box'''
+    """Implements a dropdown with search box"""
 
     dropdown = None
     search_button = None
     search_field = None
     search_box = None
     search_width = None
-    
+
     def build(self):
-        return ft.Row([
-            self.dropdown,
-            self.search_box,
-            self.search_button,
-        ])
-    
+        return ft.Row(
+            [
+                self.dropdown,
+                self.search_box,
+                self.search_button,
+            ]
+        )
+
     def __str__(self):
-        return f'dropdown_with_search {{dropdown: {self.dropdown}, search_field: {self.search_field}}}'
+        return (
+            f"dropdown_with_search {{dropdown: {self.dropdown}, search_field: {self.search_field}}}"
+        )
 
     def __init__(
         self,
@@ -282,10 +286,7 @@ class DropdownWithSearch(ft.UserControl):
             options=options,
             on_change=on_change,
         )
-        self.search_button = ft.IconButton(
-            'search',
-            on_click=self.search_now
-        )
+        self.search_button = ft.IconButton("search", on_click=self.search_now)
         self.search_field = ft.TextField(
             border="none",
             width=sr_width,
@@ -304,15 +305,15 @@ class DropdownWithSearch(ft.UserControl):
     @property
     def label(self):
         return self.dropdown.label
-    
+
     @label.setter
     def label(self, label):
         self.dropdown.label = label
-        
+
     @property
     def value(self):
         return self.dropdown.value
-    
+
     @value.setter
     def value(self, value):
         self.dropdown.value = value
@@ -323,7 +324,7 @@ class DropdownWithSearch(ft.UserControl):
     @property
     def disabled(self):
         return self.dropdown.disabled
-    
+
     @disabled.setter
     def disabled(self, disabled):
         try:
@@ -337,11 +338,11 @@ class DropdownWithSearch(ft.UserControl):
             self.done_search()
         except (AttributeError, AssertionError):
             pass
-    
+
     @property
     def options(self):
         return self.dropdown.options
-    
+
     @options.setter
     def options(self, options):
         self._options = options
@@ -350,7 +351,7 @@ class DropdownWithSearch(ft.UserControl):
     @property
     def on_change(self):
         return self.dropdown.on_change
-    
+
     @on_change.setter
     def on_change(self, on_change):
         self.dropdown.on_change = on_change
@@ -370,7 +371,7 @@ class DropdownWithSearch(ft.UserControl):
             pass
 
     def on_search(self, e):
-        if self.search_field.value.replace(' ', ''):
+        if self.search_field.value.replace(" ", ""):
             filtered_options = self.update_option_list(self.search_field.value)
             self.dropdown.options = filtered_options
             if len(filtered_options) == 1:
@@ -401,7 +402,7 @@ class DropdownWithSearch(ft.UserControl):
             self._on_search_open()
         self.search_box.width = self.search_width
         self._safe_update(self.search_box)
-        self.search_button.icon = 'highlight_remove'
+        self.search_button.icon = "highlight_remove"
         self.search_button.on_click = self.done_search
         self._safe_update(self.search_button)
         self.search_field.border = "outline"
@@ -409,11 +410,11 @@ class DropdownWithSearch(ft.UserControl):
         self.search_field.focus()
         if self.search_field.value:
             self.on_search(e)
-    
+
     def done_search(self, e=None):
         self.search_box.width = 0
         self._safe_update(self.search_box)
-        self.search_button.icon = 'search'
+        self.search_button.icon = "search"
         self.search_button.on_click = self.search_now
         self._safe_update(self.search_button)
         self.search_field.border = "none"
@@ -421,7 +422,7 @@ class DropdownWithSearch(ft.UserControl):
         self.options = self._options
         self._safe_update(self.dropdown)
 
-        
+
 class MenuButton(ft.Container):
     def __init__(
         self,

@@ -6,7 +6,7 @@ DEFAULT_PROGRESS = 0.1
 
 
 def reset_progress_bar(progress_bar) -> bool:
-    ''' Reset progress bar '''
+    """Reset progress bar"""
     global CREATE_PART_PROGRESS
 
     # Reset progress
@@ -20,7 +20,7 @@ def reset_progress_bar(progress_bar) -> bool:
 
 
 def progress_increment(inc):
-    ''' Increment progress '''
+    """Increment progress"""
     global CREATE_PART_PROGRESS, MAX_PROGRESS
 
     if CREATE_PART_PROGRESS + inc < MAX_PROGRESS:
@@ -32,7 +32,7 @@ def progress_increment(inc):
 
 
 def update_progress_bar(progress_bar, increment=0) -> bool:
-    ''' Update progress bar during part creation '''
+    """Update progress bar during part creation"""
     global DEFAULT_PROGRESS
 
     if not progress_bar:

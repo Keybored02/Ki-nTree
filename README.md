@@ -1,5 +1,5 @@
 # <img src="https://raw.githubusercontent.com/sparkmicro/Ki-nTree/main/images/logo.png" width="auto" height="32"> Ki-nTree
-### Fast part creation for [KiCad](https://kicad.org/) and [InvenTree](https://inventree.org/) 
+### Fast part creation for [KiCad](https://kicad.org/) and [InvenTree](https://inventree.org/)
 [![License: GPL v3.0](https://img.shields.io/badge/license-GPL_v3.0-green.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python Versions](https://raw.githubusercontent.com/sparkmicro/Ki-nTree/main/images/python_versions.svg)](https://www.python.org/)
 [![PyPI](https://img.shields.io/pypi/v/kintree)](https://pypi.org/project/kintree/)
@@ -50,7 +50,7 @@ Ki-nTree was developed by [@eeintech](https://github.com/eeintech) for [SPARK Mi
 * on rolling release distributions like Arch Linux some Flet dependencies need to be repaired manually:
 ```
 sudo pacman -S mpv
-sudo ln -s /usr/lib/libmpv.so /usr/lib/libmpv.so.1 
+sudo ln -s /usr/lib/libmpv.so /usr/lib/libmpv.so.1
 ```
 
 ### Installation (system wide)
@@ -161,12 +161,12 @@ Note that each time you enable the "Add" permission to an object, InvenTree auto
 2. Click on "Settings > Supplier > Mouser" and fill in the Mouser part search API key
 3. Click on "Settings > Supplier > Element14" and fill in the Element14 product search API key (key is shared with Farnell and Newark)
 4. Click on "Settings > KiCad", browse to the location where KiCad symbol, template and footprint libraries are stored on your computer then click "Save"
-5. If you intend to use InvenTree with this tool, click on "Settings > InvenTree" and fill in your InvenTree server address and credentials then click "Save" (optional: click on "Test" to check communication with server)  
-  a. It is possible to define a Proxy Server over which all interactions with InvenTree will be routed. To set a proxy server use the "Enable Proxy Support" switch in "Settings > InvenTree" and define the proxy address in the new input field.  
+5. If you intend to use InvenTree with this tool, click on "Settings > InvenTree" and fill in your InvenTree server address and credentials then click "Save" (optional: click on "Test" to check communication with server)
+  a. It is possible to define a Proxy Server over which all interactions with InvenTree will be routed. To set a proxy server use the "Enable Proxy Support" switch in "Settings > InvenTree" and define the proxy address in the new input field.
   b. Instead of user credential authentication token authentication is also supported. To use a token add it it to the "Password or Token" field and leave the "Username" empty. You can retrieve your personal access token from your InvenTree server by sending an get-request to its api url `api/user/token/`.
   c. If needed this tool can try to download the parts datasheet from the suppliers and upload it it to the attachment section of each part. For this just activate "Upload Datasheets to InvenTree" in the InvenTree settings
   d. It is also possible to sync the prices in InvenTree with the latest supplier prices. For this enable "Upload Pricing Data to InvenTree"
-6. If your InvenTree server requires a IPN in a specific pattern make sure to adjust "Settings > InvenTree > Internal Part Number" to match it or adjust the servers pattern to the one yo set in Ki-nTree 
+6. If your InvenTree server requires a IPN in a specific pattern make sure to adjust "Settings > InvenTree > Internal Part Number" to match it or adjust the servers pattern to the one yo set in Ki-nTree
 
 > Note: All URLs should start with "http://" if they do not have a valid SSL certificate.
 
@@ -179,7 +179,7 @@ Enter your Digi-Key developer account credentials then login. The following page
 
 <img src="https://raw.githubusercontent.com/sparkmicro/Ki-nTree/main/images/doc/digikey_api_approval_request.png" width="600" height="auto">
 
-Click on "Allow", another page will open.  
+Click on "Allow", another page will open.
 Click on the "Advanced" button, then click on "Proceed to localhost (unsafe)" at the bottom of the page:
 
 <img src="https://raw.githubusercontent.com/sparkmicro/Ki-nTree/main/images/doc/digikey_api_approval_request2.png"  width="600" height="auto">
@@ -217,7 +217,7 @@ Ki-nTree currently supports APIs for the following electronics suppliers: Digi-K
 3. Once the part data has been successfully fetched from the supplier's API, you can review the part information in the different fields and edit them, if needed.
 4. Then, go to the Inventree tabl to pick the `Category` and `Subcategory` to use for this part
 5. If you desire to add this part to KiCad, click the KiCad tab and select the KiCad symbol library, the template and the footprint library to use for this part
-6. Finally, go to the Create tab and launch the part creation. It will take some time to complete the process in InvenTree and/or KiCad, once it finishes you'll be notified of the result  
+6. Finally, go to the Create tab and launch the part creation. It will take some time to complete the process in InvenTree and/or KiCad, once it finishes you'll be notified of the result
 
 If the part was created or found in InvenTree, and if you have selected this option in the settings, your browser will automatically open and navigate to the new Inventree part page.
 
@@ -227,7 +227,7 @@ The automatic part generation in KiCad is controlled via templates:
 
 * Template examples are shipped together with Ki-nTree, these can be adjusted to your liking or you also can create completely new ones.
 * Each template has its own library file where the file name defines the templates name.
-* The templates can use the parameters and attributes of the InvenTree part on a wildcard base. So you can add for example `Resistance@Tolerance` into a field and the resulting part will then have the resistance and the tolerance value inside this text field. 
+* The templates can use the parameters and attributes of the InvenTree part on a wildcard base. So you can add for example `Resistance@Tolerance` into a field and the resulting part will then have the resistance and the tolerance value inside this text field.
 * Using the templates and wildcards without the InvenTree functions enabled is also possible. In this case the library parameter wildcards need to be configured in the `supplier_parameters.yaml` for each library individually.
 
 

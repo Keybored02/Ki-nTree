@@ -51,7 +51,7 @@ def fetch_all_locations(
 ) -> List[Dict[str, Any]]:
     """
     Fetch all locations from InvenTree, handling pagination.
-    
+
     Returns list of location objects.
     """
     all_locations: List[Dict[str, Any]] = []
@@ -67,7 +67,9 @@ def fetch_all_locations(
         if isinstance(data, dict) and "results" in data:
             results = data.get("results") or []
             if not isinstance(results, list):
-                raise RuntimeError("Unexpected response format: 'results' is not a list")
+                raise RuntimeError(
+                    "Unexpected response format: 'results' is not a list"
+                )
             all_locations.extend(results)
             url = data.get("next")
             params = {}  # next URL already encodes query params
@@ -108,7 +110,7 @@ def print_locations_table(locations: List[Dict[str, Any]]) -> None:
         sublocations = loc.get("sublocations", 0)
         name = loc.get("name", "")[:50]
         path = build_path(loc)[:45]
-        
+
         print(f"{pk:>6} {level:>5} {items:>7} {sublocations:>5} {name:<50} {path:>45}")
 
     print("-" * 120)
@@ -139,7 +141,7 @@ def print_locations_tree(locations: List[Dict[str, Any]]) -> None:
         items = loc.get("items", 0)
         sublocations = loc.get("sublocations", 0)
         prefix = "  " * indent + "├─ " if indent > 0 else ""
-        
+
         print(f"{prefix}{name} (pk={loc_pk}, items={items}, sub={sublocations})")
 
         # Print children
@@ -164,44 +166,24 @@ def main() -> int:
         epilog=__doc__,
     )
     parser.add_argument(
-        "--top-level",
-        action="store_true",
-        help="Show only top-level locations"
+        "--top-level", action="store_true", help="Show only top-level locations"
+    )
+    parser.add_argument("--parent", type=int, help="Filter by parent location PK")
+    parser.add_argument(
+        "--search", help="Search term (searches name, description, pathstring)"
     )
     parser.add_argument(
-        "--parent",
-        type=int,
-        help="Filter by parent location PK"
+        "--structural", action="store_true", help="Show only structural locations"
     )
     parser.add_argument(
-        "--search",
-        help="Search term (searches name, description, pathstring)"
+        "--external", action="store_true", help="Show only external locations"
     )
     parser.add_argument(
-        "--structural",
-        action="store_true",
-        help="Show only structural locations"
+        "--tree", action="store_true", help="Display as hierarchical tree"
     )
+    parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument(
-        "--external",
-        action="store_true",
-        help="Show only external locations"
-    )
-    parser.add_argument(
-        "--tree",
-        action="store_true",
-        help="Display as hierarchical tree"
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Output as JSON"
-    )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=30,
-        help="HTTP timeout in seconds"
+        "--timeout", type=int, default=30, help="HTTP timeout in seconds"
     )
 
     args = parser.parse_args()
@@ -251,7 +233,9 @@ def main() -> int:
 
     # Fetch locations
     try:
-        locations = fetch_all_locations(base_url, headers, filters, timeout=args.timeout)
+        locations = fetch_all_locations(
+            base_url, headers, filters, timeout=args.timeout
+        )
     except requests.RequestException as exc:
         print(f"ERROR: failed to fetch locations: {repr(exc)}")
         return 1

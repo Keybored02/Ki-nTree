@@ -11,8 +11,8 @@ Examples:
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
+import sys
 from typing import Any, Dict, List
 
 import requests
@@ -20,10 +20,13 @@ import requests
 # Add parent directory to path so we can import kintree
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+
+from bulk_delete_locations import _api_url
+from bulk_delete_locations import _build_auth_headers
+from bulk_delete_locations import delete_location
+
 from kintree.config import settings
 from kintree.database import inventree_api
-from bulk_delete_locations import _build_auth_headers, _api_url, delete_location
-import json
 
 
 def fetch_all_locations(
@@ -50,7 +53,9 @@ def fetch_all_locations(
         if isinstance(data, dict) and "results" in data:
             results = data.get("results") or []
             if not isinstance(results, list):
-                raise RuntimeError("Unexpected response format: 'results' is not a list")
+                raise RuntimeError(
+                    "Unexpected response format: 'results' is not a list"
+                )
             all_locations.extend(results)
             url = data.get("next")
             params = {}  # next URL already encodes query params
@@ -125,8 +130,6 @@ def find_leaf_locations(
     return sorted(leaf_pks)
 
 
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Delete leaf locations (B0x) under Taverna parent",
@@ -136,18 +139,13 @@ def main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Preview locations to delete; do not delete"
+        help="Preview locations to delete; do not delete",
     )
     parser.add_argument(
-        "--confirm",
-        action="store_true",
-        help="Actually execute deletion"
+        "--confirm", action="store_true", help="Actually execute deletion"
     )
     parser.add_argument(
-        "--timeout",
-        type=int,
-        default=30,
-        help="HTTP timeout in seconds"
+        "--timeout", type=int, default=30, help="HTTP timeout in seconds"
     )
 
     args = parser.parse_args()
@@ -242,7 +240,7 @@ def main() -> int:
             bulk_endpoint,
             headers=headers,
             json=payload,
-            timeout=args.timeout * 10  # Increase timeout for bulk operation
+            timeout=args.timeout * 10,  # Increase timeout for bulk operation
         )
 
         print(f"Response status: {response.status_code}")
@@ -253,7 +251,9 @@ def main() -> int:
             print(f"\nBulk-delete successful! Deleted {len(leaf_pks)} locations")
             return 0
         elif response.status_code == 404:
-            print("Bulk-delete endpoint not available, falling back to sequential deletion...")
+            print(
+                "Bulk-delete endpoint not available, falling back to sequential deletion..."
+            )
         else:
             print(f"Bulk-delete failed (HTTP {response.status_code})")
             print("Falling back to sequential deletion...")

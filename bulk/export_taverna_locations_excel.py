@@ -7,9 +7,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-import requests
 from openpyxl import Workbook
 from openpyxl.styles import Font
+import requests
 
 from kintree.config import settings
 from kintree.database import inventree_api
@@ -30,7 +30,9 @@ def _url(base: str, path: str) -> str:
     return f"{base.rstrip('/')}/{path.lstrip('/')}"
 
 
-def _fetch_all(base: str, headers: Dict[str, str], path: str, timeout: int = 30) -> List[Dict[str, Any]]:
+def _fetch_all(
+    base: str, headers: Dict[str, str], path: str, timeout: int = 30
+) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     url = _url(base, path)
     params: Dict[str, Any] = {}
@@ -56,7 +58,9 @@ def _fetch_all(base: str, headers: Dict[str, str], path: str, timeout: int = 30)
     return rows
 
 
-def _find_location_by_path(all_locations: List[Dict[str, Any]], target_path: str) -> Optional[Dict[str, Any]]:
+def _find_location_by_path(
+    all_locations: List[Dict[str, Any]], target_path: str
+) -> Optional[Dict[str, Any]]:
     by_pk = {int(loc["pk"]): loc for loc in all_locations if loc.get("pk") is not None}
     memo: Dict[int, str] = {}
 
@@ -81,7 +85,9 @@ def _find_location_by_path(all_locations: List[Dict[str, Any]], target_path: str
     return None
 
 
-def _collect_descendants(all_locations: List[Dict[str, Any]], root_pk: int) -> List[Dict[str, Any]]:
+def _collect_descendants(
+    all_locations: List[Dict[str, Any]], root_pk: int
+) -> List[Dict[str, Any]]:
     children: Dict[int, List[int]] = {}
     by_pk = {int(loc["pk"]): loc for loc in all_locations if loc.get("pk") is not None}
 
@@ -145,7 +151,11 @@ def main() -> int:
 
     all_locations = _fetch_all(base_url, headers, "api/stock/location/")
     location_types = _fetch_all(base_url, headers, "api/stock/location-type/")
-    type_map = {int(t["pk"]): str(t.get("name") or "") for t in location_types if t.get("pk") is not None}
+    type_map = {
+        int(t["pk"]): str(t.get("name") or "")
+        for t in location_types
+        if t.get("pk") is not None
+    }
 
     taverna = _find_location_by_path(all_locations, "Genesy / Taverna")
     if not taverna:
@@ -157,12 +167,16 @@ def main() -> int:
     filtered: List[Dict[str, Any]] = []
     for row in descendants:
         loc_type_id = row.get("location_type")
-        loc_type_name = type_map.get(int(loc_type_id), "") if loc_type_id is not None else ""
+        loc_type_name = (
+            type_map.get(int(loc_type_id), "") if loc_type_id is not None else ""
+        )
         if loc_type_name not in {"Rack", "Shelf"}:
             continue
         filtered.append(row)
 
-    filtered.sort(key=lambda r: (int(r.get("level") or 0), str(r.get("pathstring") or "")))
+    filtered.sort(
+        key=lambda r: (int(r.get("level") or 0), str(r.get("pathstring") or ""))
+    )
 
     wb = Workbook()
     ws = wb.active
@@ -185,7 +199,9 @@ def main() -> int:
 
     for row in filtered:
         loc_type_id = row.get("location_type")
-        loc_type_name = type_map.get(int(loc_type_id), "") if loc_type_id is not None else ""
+        loc_type_name = (
+            type_map.get(int(loc_type_id), "") if loc_type_id is not None else ""
+        )
         ws.append(
             [
                 row.get("pk"),
@@ -200,8 +216,13 @@ def main() -> int:
         )
 
     for column_cells in ws.columns:
-        length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in column_cells)
-        ws.column_dimensions[column_cells[0].column_letter].width = min(max(length + 2, 12), 60)
+        length = max(
+            len(str(cell.value)) if cell.value is not None else 0
+            for cell in column_cells
+        )
+        ws.column_dimensions[column_cells[0].column_letter].width = min(
+            max(length + 2, 12), 60
+        )
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = Path.cwd() / f"taverna_racks_shelves_{ts}.xlsx"

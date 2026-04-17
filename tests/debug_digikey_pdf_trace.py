@@ -15,10 +15,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import shutil
 import tempfile
 import urllib.parse
-from pathlib import Path
 
 
 def looks_like_pdf(data: bytes) -> bool:
@@ -50,12 +50,15 @@ def trace_requests(url: str, timeout: int) -> None:
     try:
         import requests
     except Exception as e:
+        import logging
+
+        logging.exception("requests_import_error:")
         print(f"requests_import_error: {e}")
         return
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "application/pdf,image/webp,image/apng,image/*,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Connection": "keep-alive",
@@ -67,6 +70,9 @@ def trace_requests(url: str, timeout: int) -> None:
         try:
             resp = requests.get(current, headers=headers, timeout=timeout, allow_redirects=False)
         except Exception as e:
+            import logging
+
+            logging.exception(f"hop_{hop}_error:")
             print(f"hop_{hop}_error: {e}")
             return
 
@@ -90,8 +96,12 @@ def trace_requests(url: str, timeout: int) -> None:
 def trace_playwright(url: str, timeout: int, out_dir: Path) -> None:
     print("\n=== playwright trace ===")
     try:
-        from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     except Exception as e:
+        import logging
+
+        logging.exception("playwright_import_error:")
         print(f"playwright_import_error: {e}")
         return
 
@@ -116,12 +126,17 @@ def trace_playwright(url: str, timeout: int, out_dir: Path) -> None:
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         except Exception as e:
+            import logging
+
+            logging.exception("goto_error:")
             print(f"goto_error: {e}")
 
         try:
             page.wait_for_load_state("networkidle", timeout=timeout_ms)
         except Exception:
-            pass
+            import logging
+
+            logging.exception("Exception in wait_for_load_state:")
 
         print(f"page_url_after_goto: {page.url}")
 
@@ -139,6 +154,9 @@ def trace_playwright(url: str, timeout: int, out_dir: Path) -> None:
         except PlaywrightTimeoutError:
             print("download_event_captured: False (timeout)")
         except Exception as e:
+            import logging
+
+            logging.exception("download_event_error:")
             print(f"download_event_error: {e}")
 
         # Candidate extraction.
@@ -159,7 +177,9 @@ def trace_playwright(url: str, timeout: int, out_dir: Path) -> None:
                         if full.startswith("http") and full not in candidates:
                             candidates.append(full)
             except Exception:
-                pass
+                import logging
+
+                logging.exception("Exception extracting candidate URLs:")
 
         if page.url.startswith("http") and page.url not in candidates:
             candidates.insert(0, page.url)

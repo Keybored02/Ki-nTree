@@ -35,6 +35,62 @@ coveralls = "^3.3.1"
 kintree = 'kintree.kintree_gui:main'
 kintree_setup_inventree = 'kintree.setup_inventree:setup_inventree'
 
+[tool.ruff]
+# Impostazioni generali (versioni, file inclusi/esclusi)
+line-length = 100
+target-version = "py310"
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    "dist",
+    "build",
+    "bulk"
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "W"]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "E722",   # bare except
+    "B007",   # loop variable not used
+    "B904",   # raise from inside except
+]
+# Only auto-fix safe, non-destructive rules. Never auto-fix import ordering
+# (I) as it can break deliberate sys.modules manipulation in test files.
+fixable = ["E", "W", "F401"]
+unfixable = ["B", "F8"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401"]  # unused imports in test shim files are intentional
+
+[tool.ruff.format]
+# Usa virgolette doppie: è lo standard Python (PEP 8) e riduce i diff.
+quote-style = "double"
+
+# Indentazione con spazi per consistenza tra diversi editor.
+indent-style = "space"
+
+# Inserisce una virgola finale automatica in liste/tuple multi-riga.
+# Fondamentale per pulire i diff di Git quando si aggiungono elementi.
+skip-magic-trailing-comma = false
+
+# Format della docstring: rende leggibili gli esempi di codice nei commenti.
+docstring-code-format = true
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
+skips = [
+    "B101",  # assert — fine in tests
+    "B110",  # try/except/pass — intentional silent-failure pattern in download helpers
+    "B112",  # try/except/continue — intentional in download loops
+    "B311",  # random — not used for cryptography
+    "B310",  # urllib.urlopen — URLs are validated upstream before being passed
+    "B113",  # requests without timeout — socket.setdefaulttimeout() covers this
+    "B105",  # hardcoded password string — false positive on empty defaults and URL constants
+    "B107",  # hardcoded password default — false positive on password='' function defaults
+]
+
 [build-system]
 requires = ["poetry-core>=1.4.2"]
 build-backend = "poetry.core.masonry.api"

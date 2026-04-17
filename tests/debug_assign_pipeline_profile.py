@@ -21,10 +21,10 @@ Notes:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import statistics
 import sys
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -349,13 +349,34 @@ def summarize(values: List[float]) -> Dict[str, float]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Profile Assign pipeline API latency")
-    parser.add_argument("--lookup", action="append", help="Lookup value (IPN, name, barcode, etc). Can be repeated.")
+    parser.add_argument(
+        "--lookup",
+        action="append",
+        help="Lookup value (IPN, name, barcode, etc). Can be repeated.",
+    )
     parser.add_argument("--lookups-file", help="Text or YAML file with lookup values")
-    parser.add_argument("--yaml-key", default="assign_lookups", help="YAML key for lookups list (default: assign_lookups)")
-    parser.add_argument("--repeat", type=int, default=1, help="Repeat each lookup N times (default: 1)")
-    parser.add_argument("--attempts", type=int, default=3, help="Retry attempts for connect/HTTP (default: 3)")
-    parser.add_argument("--delay", type=float, default=0.8, help="Retry delay seconds (default: 0.8)")
-    parser.add_argument("--include-stock", action="store_true", help="Also profile stock-list call per found part")
+    parser.add_argument(
+        "--yaml-key",
+        default="assign_lookups",
+        help="YAML key for lookups list (default: assign_lookups)",
+    )
+    parser.add_argument(
+        "--repeat", type=int, default=1, help="Repeat each lookup N times (default: 1)"
+    )
+    parser.add_argument(
+        "--attempts",
+        type=int,
+        default=3,
+        help="Retry attempts for connect/HTTP (default: 3)",
+    )
+    parser.add_argument(
+        "--delay", type=float, default=0.8, help="Retry delay seconds (default: 0.8)"
+    )
+    parser.add_argument(
+        "--include-stock",
+        action="store_true",
+        help="Also profile stock-list call per found part",
+    )
     args = parser.parse_args()
 
     lookups = load_lookups(args)
@@ -479,7 +500,9 @@ def main() -> int:
     for key in metric_keys:
         vals = [float(r[key]) for r in rows if float(r[key]) > 0]
         s = summarize(vals)
-        print(f"{key}: count={s['count']} avg={s['avg']} p50={s['p50']} p90={s['p90']} max={s['max']}")
+        print(
+            f"{key}: count={s['count']} avg={s['avg']} p50={s['p50']} p90={s['p90']} max={s['max']}"
+        )
 
     slowest = sorted(rows, key=lambda r: float(r["total_ms"]), reverse=True)[:10]
     print("\n--- slowest runs ---")

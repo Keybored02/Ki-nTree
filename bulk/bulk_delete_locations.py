@@ -14,8 +14,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
-import sys
-from typing import Any, Dict, List
+from typing import Dict, List
 
 import requests
 
@@ -49,7 +48,7 @@ def parse_pk_list(pk_spec: str) -> List[int]:
       - Mix: "29-35,38,40-42"
     """
     pks: List[int] = []
-    
+
     for part in pk_spec.split(","):
         part = part.strip()
         if "-" in part and part[0] != "-":  # Handle negative numbers
@@ -65,7 +64,7 @@ def parse_pk_list(pk_spec: str) -> List[int]:
                 pks.append(int(part))
             except ValueError:
                 raise ValueError(f"Invalid PK specification: {part}")
-    
+
     return sorted(set(pks))  # Remove duplicates and sort
 
 
@@ -77,7 +76,7 @@ def delete_location(
 ) -> bool:
     """
     Delete a stock location by PK.
-    
+
     Returns True on success, False on failure.
     """
     endpoint = _api_url(base_url, f"api/stock/location/{pk}/")
@@ -102,54 +101,47 @@ def main() -> int:
     parser.add_argument(
         "--pks",
         required=True,
-        help="PK list: '29-61', '29,30,31', or mix '29-35,38,40-42'"
+        help="PK list: '29-61', '29,30,31', or mix '29-35,38,40-42'",
     )
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Preview PKs to delete; do not delete"
+        "--dry-run", action="store_true", help="Preview PKs to delete; do not delete"
     )
     parser.add_argument(
-        "--confirm",
-        action="store_true",
-        help="Actually execute deletion"
+        "--confirm", action="store_true", help="Actually execute deletion"
     )
     parser.add_argument(
-        "--timeout",
-        type=int,
-        default=30,
-        help="HTTP timeout in seconds"
+        "--timeout", type=int, default=30, help="HTTP timeout in seconds"
     )
-    
+
     args = parser.parse_args()
-    
+
     if not args.dry_run and not args.confirm:
         print("ERROR: refusing to run without --dry-run or --confirm")
         print("Tip: start with --dry-run to preview")
         return 2
-    
+
     # Parse PK list
     try:
         pks = parse_pk_list(args.pks)
     except ValueError as exc:
         print(f"ERROR: {exc}")
         return 2
-    
+
     if not pks:
         print("ERROR: no PKs to delete")
         return 2
-    
+
     # Load InvenTree credentials
     settings.load_inventree_settings()
-    
+
     if not settings.SERVER_ADDRESS:
         print("ERROR: Missing InvenTree SERVER_ADDRESS in config")
         return 2
-    
+
     if not settings.USERNAME or not settings.PASSWORD:
         print("ERROR: Missing InvenTree USERNAME/PASSWORD in config")
         return 2
-    
+
     # Connect
     print(f"Connecting to InvenTree: {settings.SERVER_ADDRESS}")
     connected = inventree_api.connect(
@@ -160,15 +152,15 @@ def main() -> int:
         silent=False,
         proxies=settings.PROXIES if getattr(settings, "ENABLE_PROXY", False) else None,
     )
-    
+
     if not connected:
         print("ERROR: Could not authenticate to InvenTree")
         return 1
-    
+
     api_obj = inventree_api.inventree_api
     headers = _build_auth_headers(api_obj)
     base_url = getattr(api_obj, "base_url", settings.SERVER_ADDRESS)
-    
+
     # Print preview
     print(f"\nPreview: {len(pks)} locations to DELETE (in reverse order)")
     print("-" * 60)
@@ -177,15 +169,15 @@ def main() -> int:
     if len(pks) > 20:
         print(f"  ... and {len(pks) - 20} more")
     print("-" * 60)
-    
+
     if args.dry_run:
         print("Dry-run complete. No deletions performed.")
         return 0
-    
+
     # Execute deletion in reverse order (delete children before parents)
     deleted = 0
     failed = 0
-    
+
     print("\nDeleting locations (reverse order)...")
     for pk in reversed(pks):
         try:
@@ -195,7 +187,7 @@ def main() -> int:
         except Exception as exc:
             failed += 1
             print(f"  ✗ Failed to delete pk={pk}: {repr(exc)}")
-    
+
     print(f"\nDeletion complete: deleted={deleted} failed={failed}")
     return 0 if failed == 0 else 1
 

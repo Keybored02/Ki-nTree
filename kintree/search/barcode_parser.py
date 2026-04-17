@@ -32,19 +32,19 @@ class BarcodeParser:
     Provides fallback to regex-based parsing for robustness.
     """
 
-    CUSTOMER_ORDER_NUMBER = 'customer_order_number'
-    SUPPLIER_ORDER_NUMBER = 'supplier_order_number'
-    PACKING_LIST_NUMBER = 'packing_list_number'
-    INVOICE_NUMBER = 'invoice_number'
-    SHIP_DATE = 'ship_date'
-    DATE_CODE = 'date_code'
-    PURCHASE_ORDER_LINE = 'purchase_order_line'
-    SUPPLIER_PART_NUMBER = 'supplier_part_number'
-    MANUFACTURER_PART_NUMBER = 'manufacturer_part_number'
-    COUNTRY_OF_ORIGIN = 'country_of_origin'
-    LOT_CODE = 'lot_code'
-    MANUFACTURER = 'manufacturer'
-    QUANTITY = 'quantity'
+    CUSTOMER_ORDER_NUMBER = "customer_order_number"
+    SUPPLIER_ORDER_NUMBER = "supplier_order_number"
+    PACKING_LIST_NUMBER = "packing_list_number"
+    INVOICE_NUMBER = "invoice_number"
+    SHIP_DATE = "ship_date"
+    DATE_CODE = "date_code"
+    PURCHASE_ORDER_LINE = "purchase_order_line"
+    SUPPLIER_PART_NUMBER = "supplier_part_number"
+    MANUFACTURER_PART_NUMBER = "manufacturer_part_number"
+    COUNTRY_OF_ORIGIN = "country_of_origin"
+    LOT_CODE = "lot_code"
+    MANUFACTURER = "manufacturer"
+    QUANTITY = "quantity"
 
     @classmethod
     def ecia_field_map(cls):
@@ -56,22 +56,22 @@ class BarcodeParser:
         if it does not use the standard field names.
         """
         return {
-            'K': cls.CUSTOMER_ORDER_NUMBER,
-            '1K': cls.SUPPLIER_ORDER_NUMBER,
-            '11K': cls.PACKING_LIST_NUMBER,
-            '10K': cls.INVOICE_NUMBER,
-            '6D': cls.SHIP_DATE,
-            '9D': cls.DATE_CODE,
-            '10D': cls.DATE_CODE,
-            '4K': cls.PURCHASE_ORDER_LINE,
-            '14K': cls.PURCHASE_ORDER_LINE,
-            'P': cls.SUPPLIER_PART_NUMBER,
-            '1P': cls.MANUFACTURER_PART_NUMBER,
-            '30P': cls.SUPPLIER_PART_NUMBER,
-            '1T': cls.LOT_CODE,
-            '4L': cls.COUNTRY_OF_ORIGIN,
-            '1V': cls.MANUFACTURER,
-            'Q': cls.QUANTITY,
+            "K": cls.CUSTOMER_ORDER_NUMBER,
+            "1K": cls.SUPPLIER_ORDER_NUMBER,
+            "11K": cls.PACKING_LIST_NUMBER,
+            "10K": cls.INVOICE_NUMBER,
+            "6D": cls.SHIP_DATE,
+            "9D": cls.DATE_CODE,
+            "10D": cls.DATE_CODE,
+            "4K": cls.PURCHASE_ORDER_LINE,
+            "14K": cls.PURCHASE_ORDER_LINE,
+            "P": cls.SUPPLIER_PART_NUMBER,
+            "1P": cls.MANUFACTURER_PART_NUMBER,
+            "30P": cls.SUPPLIER_PART_NUMBER,
+            "1T": cls.LOT_CODE,
+            "4L": cls.COUNTRY_OF_ORIGIN,
+            "1V": cls.MANUFACTURER,
+            "Q": cls.QUANTITY,
         }
 
     @staticmethod
@@ -83,30 +83,30 @@ class BarcodeParser:
         ``>06...``. This helper restores a canonical ``[)>06`` prefix when
         possible so downstream detection/parsing remains reliable.
         """
-        data = str(barcode or '').strip()
+        data = str(barcode or "").strip()
         if not data:
             return data
 
-        if data.startswith('[)>\x1e06\x1d') or data.startswith('[)>06'):
+        if data.startswith("[)>\x1e06\x1d") or data.startswith("[)>06"):
             return data
 
         # If canonical marker exists later in the payload, trim leading noise.
-        idx = data.find('[)>06')
+        idx = data.find("[)>06")
         if idx > 0:
             return data[idx:]
 
         # Recover commonly truncated variants.
-        if ')>06' in data:
-            i = data.find(')>06')
-            return '[' + data[i:]
+        if ")>06" in data:
+            i = data.find(")>06")
+            return "[" + data[i:]
 
-        if '>06' in data:
-            i = data.find('>06')
-            return '[)' + data[i:]
+        if ">06" in data:
+            i = data.find(">06")
+            return "[)" + data[i:]
 
         # Last-resort recovery: if stream starts with 06 and looks GS1-like.
-        if data.startswith('06') and re.search(r'06[KPQ1]', data):
-            return '[)>' + data
+        if data.startswith("06") and re.search(r"06[KPQ1]", data):
+            return "[)>" + data
 
         return data
 
@@ -123,24 +123,24 @@ class BarcodeParser:
         barcode = BarcodeParser._normalize_gs1_input(barcode)
 
         # LCSC: JSON-like format with curly braces
-        if barcode.strip().startswith('{') and ('pm:' in barcode or 'pc:' in barcode):
-            return 'lcsc'
+        if barcode.strip().startswith("{") and ("pm:" in barcode or "pc:" in barcode):
+            return "lcsc"
 
         # GS1-128 format (starts with [)>06)
-        if barcode.startswith('[)>06'):
+        if barcode.startswith("[)>06"):
             # Digi-Key: Contains -ND suffix (part-dependent marker)
-            if re.search(r'-ND', barcode):
-                return 'digikey'
+            if re.search(r"-ND", barcode):
+                return "digikey"
 
             # Mouser: GS1-128 without -ND marker
-            if re.search(r'\[?\)?>?06K', barcode):
-                return 'mouser'
+            if re.search(r"\[?\)?>?06K", barcode):
+                return "mouser"
 
         # TME: Key-value pairs format (QTY:, PN:, etc.)
-        if 'QTY:' in barcode or 'PN:' in barcode or 'tme.eu' in barcode:
-            return 'tme'
+        if "QTY:" in barcode or "PN:" in barcode or "tme.eu" in barcode:
+            return "tme"
 
-        return 'unknown'
+        return "unknown"
 
     @staticmethod
     def parse_tme(barcode: str) -> Dict:
@@ -158,35 +158,36 @@ class BarcodeParser:
         """
         # TME field name map
         TME_FIELD_MAP = {
-            'PN': 'supplier_part_number',
-            'CPO': 'customer_order_number',
-            'PO': 'supplier_order_number',
-            'MPN': 'manufacturer_part_number',
-            'QTY': 'quantity',
+            "PN": "supplier_part_number",
+            "CPO": "customer_order_number",
+            "PO": "supplier_order_number",
+            "MPN": "manufacturer_part_number",
+            "QTY": "quantity",
         }
 
-        result = {'supplier': 'tme'}
+        result = {"supplier": "tme"}
 
         # Extract TME QR fields (delimited by field names)
         # Pattern: FIELDNAME:value with fields separated by spaces or specific delimiters
         for field_id, field_name in TME_FIELD_MAP.items():
-            pattern = rf'{field_id}[:=]([^\s]+)'
+            pattern = rf"{field_id}[:=]([^\s]+)"
             match = re.search(pattern, barcode)
             if match:
                 value = match.group(1)
-                if field_id == 'QTY':
+                if field_id == "QTY":
                     result[field_name] = int(value)
                 else:
                     result[field_name] = value
 
         # Normalize to output format
         normalized = {
-            'supplier': 'tme',
-            'barcode': result.get('manufacturer_part_number', '') or result.get('supplier_part_number', ''),
-            'supplier_pn': result.get('supplier_part_number', ''),
-            'manufacturer_pn': result.get('manufacturer_part_number', ''),
-            'quantity': result.get('quantity', 0),
-            'raw_data': result
+            "supplier": "tme",
+            "barcode": result.get("manufacturer_part_number", "")
+            or result.get("supplier_part_number", ""),
+            "supplier_pn": result.get("supplier_part_number", ""),
+            "manufacturer_pn": result.get("manufacturer_part_number", ""),
+            "quantity": result.get("quantity", 0),
+            "raw_data": result,
         }
 
         return normalized
@@ -209,24 +210,24 @@ class BarcodeParser:
         """
         # LCSC field name map
         LCSC_FIELD_MAP = {
-            'pc': 'supplier_part_number',
-            'pm': 'manufacturer_part_number',
-            'qty': 'quantity',
-            'on': 'supplier_order_number',
-            'pbn': 'pick_bin_number',
+            "pc": "supplier_part_number",
+            "pm": "manufacturer_part_number",
+            "qty": "quantity",
+            "on": "supplier_order_number",
+            "pbn": "pick_bin_number",
         }
 
-        result = {'supplier': 'lcsc'}
+        result = {"supplier": "lcsc"}
 
         # Extract LCSC QR fields from JSON-like format
         # Pattern: fieldname:value with fields separated by commas
         for field_id, field_name in LCSC_FIELD_MAP.items():
             # Match field_id followed by : and then value until comma or }
-            pattern = rf'{field_id}:([^,}}]+)'
+            pattern = rf"{field_id}:([^,}}]+)"
             match = re.search(pattern, barcode)
             if match:
                 value = match.group(1).strip()
-                if field_id == 'qty':
+                if field_id == "qty":
                     try:
                         result[field_name] = int(value)
                     except (ValueError, TypeError):
@@ -236,12 +237,13 @@ class BarcodeParser:
 
         # Normalize to output format
         normalized = {
-            'supplier': 'lcsc',
-            'barcode': result.get('manufacturer_part_number', '') or result.get('supplier_part_number', ''),
-            'supplier_pn': result.get('supplier_part_number', ''),
-            'manufacturer_pn': result.get('manufacturer_part_number', ''),
-            'quantity': result.get('quantity', 0),
-            'raw_data': result
+            "supplier": "lcsc",
+            "barcode": result.get("manufacturer_part_number", "")
+            or result.get("supplier_part_number", ""),
+            "supplier_pn": result.get("supplier_part_number", ""),
+            "manufacturer_pn": result.get("manufacturer_part_number", ""),
+            "quantity": result.get("quantity", 0),
+            "raw_data": result,
         }
 
         return normalized
@@ -260,36 +262,40 @@ class BarcodeParser:
     # `required=False` means the field may be skipped if absent; we try to
     # match it and advance only on success.
     _DIGIKEY_SEQUENCE = [
-        ('P',    SUPPLIER_PART_NUMBER,     True),   # P<dk_pn>-ND
-        ('1P',   MANUFACTURER_PART_NUMBER, True),   # 1P<mpn>
-        ('30P',  SUPPLIER_PART_NUMBER,     False),  # 30P<dk_pn>-ND (repeat)
-        ('K',    CUSTOMER_ORDER_NUMBER,    False),  # K<cust_order>
-        ('1K',   SUPPLIER_ORDER_NUMBER,    False),  # 1K<sales_order>
-        ('10K',  INVOICE_NUMBER,           False),  # 10K<invoice>
-        ('9D',   DATE_CODE,                False),  # 9D<YYWW>
-        ('1T',   LOT_CODE,                 False),  # 1T<lot>
-        ('11K',  PACKING_LIST_NUMBER,      False),  # 11K<packing>
-        ('4L',   COUNTRY_OF_ORIGIN,        False),  # 4L<country>
-        ('Q',    QUANTITY,                 False),  # Q<qty>
-        ('11Z',  '_trailer',               False),  # 11Z<pick> — terminates Q
+        ("P", SUPPLIER_PART_NUMBER, True),  # P<dk_pn>-ND
+        ("1P", MANUFACTURER_PART_NUMBER, True),  # 1P<mpn>
+        ("30P", SUPPLIER_PART_NUMBER, False),  # 30P<dk_pn>-ND (repeat)
+        ("K", CUSTOMER_ORDER_NUMBER, False),  # K<cust_order>
+        ("1K", SUPPLIER_ORDER_NUMBER, False),  # 1K<sales_order>
+        ("10K", INVOICE_NUMBER, False),  # 10K<invoice>
+        ("9D", DATE_CODE, False),  # 9D<YYWW>
+        ("1T", LOT_CODE, False),  # 1T<lot>
+        ("11K", PACKING_LIST_NUMBER, False),  # 11K<packing>
+        ("4L", COUNTRY_OF_ORIGIN, False),  # 4L<country>
+        ("Q", QUANTITY, False),  # Q<qty>
+        ("11Z", "_trailer", False),  # 11Z<pick> — terminates Q
     ]
 
     _MOUSER_SEQUENCE = [
-        ('K',    CUSTOMER_ORDER_NUMBER,    True),   # K<cust_order>
-        ('14K',  PURCHASE_ORDER_LINE,      False),  # 14K<po_line>
-        ('1P',   MANUFACTURER_PART_NUMBER, True),   # 1P<mpn> (Mouser: MPN, not supplier PN)
-        ('Q',    QUANTITY,                 True),   # Q<qty>
-        ('11K',  PACKING_LIST_NUMBER,      False),  # 11K<pack>
-        ('10K',  INVOICE_NUMBER,           False),  # 10K<invoice>
-        ('4L',   COUNTRY_OF_ORIGIN,        False),  # 4L<country>
-        ('1V',   MANUFACTURER,             False),  # 1V<manufacturer>
-        ('1T',   LOT_CODE,                 False),  # 1T<lot>
+        ("K", CUSTOMER_ORDER_NUMBER, True),  # K<cust_order>
+        ("14K", PURCHASE_ORDER_LINE, False),  # 14K<po_line>
+        (
+            "1P",
+            MANUFACTURER_PART_NUMBER,
+            True,
+        ),  # 1P<mpn> (Mouser: MPN, not supplier PN)
+        ("Q", QUANTITY, True),  # Q<qty>
+        ("11K", PACKING_LIST_NUMBER, False),  # 11K<pack>
+        ("10K", INVOICE_NUMBER, False),  # 10K<invoice>
+        ("4L", COUNTRY_OF_ORIGIN, False),  # 4L<country>
+        ("1V", MANUFACTURER, False),  # 1V<manufacturer>
+        ("1T", LOT_CODE, False),  # 1T<lot>
     ]
 
     @staticmethod
     def _quantity_to_int(value: str) -> int:
         """Coerce a raw Q-field value to int, tolerating trailing non-digits."""
-        match = re.match(r'\d+', str(value or ''))
+        match = re.match(r"\d+", str(value or ""))
         try:
             return int(match.group(0)) if match else 0
         except (TypeError, ValueError):
@@ -328,7 +334,7 @@ class BarcodeParser:
             # Only identifiers that appear *later in the sequence* are valid
             # terminators — this is what eliminates the ambiguity.
             value_end = n
-            for next_id, _, _ in sequence[i + 1:]:
+            for next_id, _, _ in sequence[i + 1 :]:
                 pos = data.find(next_id, value_start)
                 if pos != -1 and pos < value_end:
                     value_end = pos
@@ -345,15 +351,15 @@ class BarcodeParser:
     @staticmethod
     def _strip_gs1_prefix(barcode: str) -> str:
         """Remove the GS1 header and any stray GS/RS control characters."""
-        data = str(barcode or '')
-        for prefix in ('[)>\x1e06\x1d', '[)>06\x1d', '[)>06'):
+        data = str(barcode or "")
+        for prefix in ("[)>\x1e06\x1d", "[)>06\x1d", "[)>06"):
             if data.startswith(prefix):
-                data = data[len(prefix):]
+                data = data[len(prefix) :]
                 break
         # Drop any remaining GS (0x1d) / RS (0x1e) / EOT (0x04) chars — we're
         # parsing the delimiter-stripped form regardless of whether some
         # survived the scanner.
-        return data.replace('\x1d', '').replace('\x1e', '').replace('\x04', '')
+        return data.replace("\x1d", "").replace("\x1e", "").replace("\x04", "")
 
     @staticmethod
     def parse_mouser(barcode: str) -> Dict:
@@ -370,25 +376,25 @@ class BarcodeParser:
         fields = BarcodeParser._parse_sequence(data, BarcodeParser._MOUSER_SEQUENCE)
 
         # Mouser uses `K` for both customer and supplier order number.
-        order_number = fields.get(BarcodeParser.CUSTOMER_ORDER_NUMBER, '')
+        order_number = fields.get(BarcodeParser.CUSTOMER_ORDER_NUMBER, "")
         fields.setdefault(BarcodeParser.SUPPLIER_ORDER_NUMBER, order_number)
 
-        mpn = fields.get(BarcodeParser.MANUFACTURER_PART_NUMBER, '')
-        quantity = BarcodeParser._quantity_to_int(fields.get(BarcodeParser.QUANTITY, ''))
+        mpn = fields.get(BarcodeParser.MANUFACTURER_PART_NUMBER, "")
+        quantity = BarcodeParser._quantity_to_int(fields.get(BarcodeParser.QUANTITY, ""))
 
-        raw = {'supplier': 'mouser', **fields, 'quantity': quantity}
+        raw = {"supplier": "mouser", **fields, "quantity": quantity}
 
         return {
-            'supplier': 'mouser',
-            'barcode': mpn,
-            'supplier_pn': '',  # Mouser QR does NOT include supplier PN
-            'manufacturer_pn': mpn,
-            'quantity': quantity,
-            'order_number': order_number,
-            'supplier_order_number': order_number,
-            'customer_order_number': order_number,
-            'manufacturer': fields.get(BarcodeParser.MANUFACTURER, '').strip(),
-            'raw_data': raw,
+            "supplier": "mouser",
+            "barcode": mpn,
+            "supplier_pn": "",  # Mouser QR does NOT include supplier PN
+            "manufacturer_pn": mpn,
+            "quantity": quantity,
+            "order_number": order_number,
+            "supplier_order_number": order_number,
+            "customer_order_number": order_number,
+            "manufacturer": fields.get(BarcodeParser.MANUFACTURER, "").strip(),
+            "raw_data": raw,
         }
 
     @staticmethod
@@ -408,28 +414,28 @@ class BarcodeParser:
         """
         data = BarcodeParser._strip_gs1_prefix(barcode)
         fields = BarcodeParser._parse_sequence(data, BarcodeParser._DIGIKEY_SEQUENCE)
-        fields.pop('_trailer', None)
+        fields.pop("_trailer", None)
 
-        supplier_pn = fields.get(BarcodeParser.SUPPLIER_PART_NUMBER, '')
-        manufacturer_pn = fields.get(BarcodeParser.MANUFACTURER_PART_NUMBER, '')
-        customer_order = fields.get(BarcodeParser.CUSTOMER_ORDER_NUMBER, '')
-        supplier_order = fields.get(BarcodeParser.SUPPLIER_ORDER_NUMBER, '') or customer_order
+        supplier_pn = fields.get(BarcodeParser.SUPPLIER_PART_NUMBER, "")
+        manufacturer_pn = fields.get(BarcodeParser.MANUFACTURER_PART_NUMBER, "")
+        customer_order = fields.get(BarcodeParser.CUSTOMER_ORDER_NUMBER, "")
+        supplier_order = fields.get(BarcodeParser.SUPPLIER_ORDER_NUMBER, "") or customer_order
 
-        quantity = BarcodeParser._quantity_to_int(fields.get(BarcodeParser.QUANTITY, ''))
+        quantity = BarcodeParser._quantity_to_int(fields.get(BarcodeParser.QUANTITY, ""))
 
-        raw = {'supplier': 'digikey', **fields, 'quantity': quantity}
+        raw = {"supplier": "digikey", **fields, "quantity": quantity}
 
         return {
-            'supplier': 'digikey',
-            'barcode': manufacturer_pn or supplier_pn,
-            'supplier_pn': supplier_pn,
-            'digikey_pn': supplier_pn,
-            'manufacturer_pn': manufacturer_pn,
-            'quantity': quantity,
-            'order_number': supplier_order,
-            'supplier_order_number': supplier_order,
-            'customer_order_number': customer_order,
-            'raw_data': raw,
+            "supplier": "digikey",
+            "barcode": manufacturer_pn or supplier_pn,
+            "supplier_pn": supplier_pn,
+            "digikey_pn": supplier_pn,
+            "manufacturer_pn": manufacturer_pn,
+            "quantity": quantity,
+            "order_number": supplier_order,
+            "supplier_order_number": supplier_order,
+            "customer_order_number": customer_order,
+            "raw_data": raw,
         }
 
     @classmethod
@@ -448,40 +454,52 @@ class BarcodeParser:
         barcode = barcode.strip()
         supplier = cls.detect_supplier(barcode)
 
-        if supplier == 'lcsc':
+        if supplier == "lcsc":
             return cls.parse_lcsc(barcode)
-        elif supplier == 'tme':
+        elif supplier == "tme":
             return cls.parse_tme(barcode)
-        elif supplier == 'mouser':
+        elif supplier == "mouser":
             return cls.parse_mouser(barcode)
-        elif supplier == 'digikey':
+        elif supplier == "digikey":
             return cls.parse_digikey(barcode)
         else:
             return {
-                'supplier': 'unknown',
-                'barcode': '',
-                'error': f'Could not identify supplier from: {barcode[:50]}...'
+                "supplier": "unknown",
+                "barcode": "",
+                "error": f"Could not identify supplier from: {barcode[:50]}...",
             }
 
 
 def main() -> None:
     """Test parser with barcode examples from supported suppliers.
-    
+
     Barcode scanning GUI uses Digi-Key and Mouser. LCSC and TME shown for reference.
     """
     test_barcodes = [
         ("Mouser", "[)>06K3828825514K0011P67C18-8-M-PQ511K0895610514LUS1VGrayhill"),
-        ("Mouser (P-only MPN)", "[)>06K3878883614K0011PKTSC-21RQ10011K0896618144LVN1VDiptronics"),
-        ("Digi-Key", "[)>06PGH7880-ND1P67C18-8-M-P30PGH7880-NDK1K9818346510K1228880039D25491T000043333911K14LUSQ1511Z"),
-        ("LCSC", "{pbn:PICK2603230135,on:WM2603240072,pc:C2922211,pm:DB2EKN-3.5-3P-GN,qty:65,mc:,cc:1,pdi:204696597,hp:null,wc:ZH}"),
-        ("TME (reference)", "PN:M3X10/D7985B CPO:12345 PO:33388984 MPN:M3X10/D7985B QTY:100"),
+        (
+            "Mouser (P-only MPN)",
+            "[)>06K3878883614K0011PKTSC-21RQ10011K0896618144LVN1VDiptronics",
+        ),
+        (
+            "Digi-Key",
+            "[)>06PGH7880-ND1P67C18-8-M-P30PGH7880-NDK1K9818346510K1228880039D25491T000043333911K14LUSQ1511Z",
+        ),
+        (
+            "LCSC",
+            "{pbn:PICK2603230135,on:WM2603240072,pc:C2922211,pm:DB2EKN-3.5-3P-GN,qty:65,mc:,cc:1,pdi:204696597,hp:null,wc:ZH}",
+        ),
+        (
+            "TME (reference)",
+            "PN:M3X10/D7985B CPO:12345 PO:33388984 MPN:M3X10/D7985B QTY:100",
+        ),
     ]
 
     parser = BarcodeParser()
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("BARCODE PARSER TEST (ECIA/ISO-IEC 15434 Standard)")
     print("Barcode Scanning GUI: Digi-Key and Mouser only")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     for supplier_name, barcode in test_barcodes:
         result = parser.parse(barcode)
@@ -491,8 +509,8 @@ def main() -> None:
         print(f"  Manufacturer PN: {result.get('manufacturer_pn', '(none)')}")
         print(f"  Quantity: {result.get('quantity', 0)}")
 
-    print(f"\n{'='*70}\n")
+    print(f"\n{'=' * 70}\n")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

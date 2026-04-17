@@ -1,9 +1,10 @@
 import sys
 
-from .config import settings
 from .common.tools import cprint
 from .config import config_interface
-from .database import inventree_api, inventree_interface
+from .config import settings
+from .database import inventree_api
+from .database import inventree_interface
 
 
 def setup_inventree():
@@ -22,11 +23,11 @@ def setup_inventree():
                 create_categories(parent=name, name=cat, categories=categories[name])
 
     if SETUP_CATEGORIES or SETUP_PARAMETERS:
-        cprint('\n[MAIN]\tStarting InvenTree setup', silent=settings.SILENT)
+        cprint("\n[MAIN]\tStarting InvenTree setup", silent=settings.SILENT)
         # Load category configuration file
-        categories = config_interface.load_file(settings.CONFIG_CATEGORIES)['CATEGORIES']
+        categories = config_interface.load_file(settings.CONFIG_CATEGORIES)["CATEGORIES"]
 
-        cprint('[MAIN]\tConnecting to Inventree', silent=settings.SILENT)
+        cprint("[MAIN]\tConnecting to Inventree", silent=settings.SILENT)
         inventree_connect = inventree_interface.connect_to_server()
 
         if not inventree_connect:
@@ -37,14 +38,14 @@ def setup_inventree():
 
     if SETUP_CATEGORIES:
         for category in categories.keys():
-            cprint(f'\n[MAIN]\tCreating categories in {category.upper()}')
+            cprint(f"\n[MAIN]\tCreating categories in {category.upper()}")
             create_categories(parent=None, name=category, categories=categories)
 
     if SETUP_PARAMETERS:
         # Load parameter configuration file
         parameters = config_interface.load_file(settings.CONFIG_PARAMETERS)
         # cprint(parameters)
-        cprint('\n[MAIN]\tLoading Parameters')
+        cprint("\n[MAIN]\tLoading Parameters")
         for name, unit in parameters.items():
             pk = inventree_api.create_parameter_template(name, unit)
             if pk > 0:
@@ -53,5 +54,5 @@ def setup_inventree():
                 cprint(f'[TREE]\tWarning: Parameter "{name}" already exists')
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     setup_inventree()

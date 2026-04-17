@@ -16,9 +16,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import shutil
 import tempfile
-from pathlib import Path
 
 from kintree.common import tools
 
@@ -35,7 +35,7 @@ def print_result(label: str, ok: bool, path: Path | None = None, note: str = "")
             with path.open("rb") as f:
                 head = f.read(64)
             print(f"head_hex: {head.hex(' ')}")
-            ascii_preview = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in head)
+            ascii_preview = "".join(chr(b) if 32 <= b <= 126 else "." for b in head)
             print(f"head_ascii: {ascii_preview}")
             valid = tools.validate_downloaded_file(
                 file_path=str(path),
@@ -60,7 +60,7 @@ def main() -> int:
 
     try:
         # 0) Playwright is now universal (no supplier gate)
-        print(f"\nplaywright_enabled: True (now universal for all PDF/Image downloads)")
+        print("\nplaywright_enabled: True (now universal for all PDF/Image downloads)")
 
         # 1) Playwright path
         pw_file = workdir / "playwright.pdf"

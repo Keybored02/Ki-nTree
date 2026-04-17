@@ -18,13 +18,11 @@ This script runs multiple download methods independently and reports:
 from __future__ import annotations
 
 import argparse
-import os
+from pathlib import Path
 import shutil
 import sys
 import tempfile
 import urllib.request
-from pathlib import Path
-
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -304,7 +302,9 @@ if __name__ == "__main__":
     parser.add_argument("url", help="Target URL to download")
     parser.add_argument("--filetype", choices=["PDF", "Image"], default="PDF")
     parser.add_argument("--keep", action="store_true", help="Keep downloaded payload files")
-    parser.add_argument("--include-cloudscraper", action="store_true", help="Also test cloudscraper")
+    parser.add_argument(
+        "--include-cloudscraper", action="store_true", help="Also test cloudscraper"
+    )
 
     ARGS = parser.parse_args()
     ARGS.ext = "pdf" if ARGS.filetype == "PDF" else "bin"

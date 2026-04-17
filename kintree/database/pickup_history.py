@@ -35,25 +35,25 @@ Record schema
 
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import os
-import uuid
-from datetime import datetime
 from typing import Dict, List, Optional
+import uuid
 
 from ..config import settings
-
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _ops_dir() -> str:
     return settings.pickup_ops_dir
 
 
 def _record_path(record_id: str) -> str:
-    return os.path.join(_ops_dir(), f'{record_id}.json')
+    return os.path.join(_ops_dir(), f"{record_id}.json")
 
 
 def _now_iso() -> str:
@@ -64,31 +64,33 @@ def _items_to_dicts(items) -> List[Dict]:
     """Convert a list of PickupItem objects to plain dicts."""
     result = []
     for it in items:
-        result.append({
-            'part_pk':   int(it.part_pk),
-            'part_name': str(it.part_name),
-            'location':  str(it.location),
-            'quantity':  float(it.quantity),
-            'reference': str(it.reference),
-            'scanned':   bool(it.scanned),
-            'checked':   bool(it.checked),
-        })
+        result.append(
+            {
+                "part_pk": int(it.part_pk),
+                "part_name": str(it.part_name),
+                "location": str(it.location),
+                "quantity": float(it.quantity),
+                "reference": str(it.reference),
+                "scanned": bool(it.scanned),
+                "checked": bool(it.checked),
+            }
+        )
     return result
 
 
 def _status_of(items) -> str:
     if not items:
-        return 'not_started'
+        return "not_started"
     done = sum(1 for it in items if it.scanned or it.checked)
-    return 'complete' if done == len(items) else 'incomplete'
+    return "complete" if done == len(items) else "incomplete"
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def save_op(record_id: Optional[str], query: str, label: str,
-            mode: str, items) -> str:
+
+def save_op(record_id: Optional[str], query: str, label: str, mode: str, items) -> str:
     """Persist a single mode's items into the operation record.
 
     Parameters
@@ -112,24 +114,24 @@ def save_op(record_id: Optional[str], query: str, label: str,
     if not record:
         record_id = record_id or str(uuid.uuid4())
         record = {
-            'id':         record_id,
-            'label':      label,
-            'query':      query,
-            'created_at': now,
-            'updated_at': now,
-            'out': {'status': 'not_started', 'items': []},
-            'in':  {'status': 'not_started', 'items': []},
+            "id": record_id,
+            "label": label,
+            "query": query,
+            "created_at": now,
+            "updated_at": now,
+            "out": {"status": "not_started", "items": []},
+            "in": {"status": "not_started", "items": []},
         }
     else:
-        record['updated_at'] = now
+        record["updated_at"] = now
 
-    key = 'out' if mode == 'out' else 'in'
+    key = "out" if mode == "out" else "in"
     record[key] = {
-        'status': _status_of(items),
-        'items':  _items_to_dicts(items),
+        "status": _status_of(items),
+        "items": _items_to_dicts(items),
     }
 
-    with open(_record_path(record_id), 'w', encoding='utf-8') as fh:
+    with open(_record_path(record_id), "w", encoding="utf-8") as fh:
         json.dump(record, fh, indent=2)
 
     return record_id
@@ -141,7 +143,7 @@ def load_record(record_id: str) -> Optional[Dict]:
     if not os.path.isfile(path):
         return None
     try:
-        with open(path, 'r', encoding='utf-8') as fh:
+        with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
     except Exception:
         return None
@@ -152,17 +154,21 @@ def list_records() -> List[Dict]:
     records = []
     try:
         for fname in os.listdir(_ops_dir()):
-            if not fname.endswith('.json'):
+            if not fname.endswith(".json"):
                 continue
             path = os.path.join(_ops_dir(), fname)
             try:
-                with open(path, 'r', encoding='utf-8') as fh:
+                with open(path, "r", encoding="utf-8") as fh:
                     records.append(json.load(fh))
             except Exception:
-                pass
+                import logging
+
+                logging.exception("Exception loading pickup history file:")
     except Exception:
-        pass
-    records.sort(key=lambda r: r.get('updated_at', ''), reverse=True)
+        import logging
+
+        logging.exception("Exception loading pickup history:")
+    records.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
     return records
 
 

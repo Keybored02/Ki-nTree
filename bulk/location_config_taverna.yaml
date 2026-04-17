@@ -1,5 +1,5 @@
 # Configuration for bulk creating nested stock locations with location types
-# 
+#
 # This creates a hierarchy:
 #   R01 / L01 / B01-B20
 #   R01 / L02 / B01-B20

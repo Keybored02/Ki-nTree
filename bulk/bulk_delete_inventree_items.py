@@ -16,16 +16,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from typing import Any, Dict, List
 
+from inventree.part import Part
+from inventree.stock import StockItem
 import requests
 
 from kintree.config import settings
 from kintree.database import inventree_api
-from inventree.part import Part
-from inventree.stock import StockItem
-
 
 MODEL_CONFIG = {
     # model_arg: (api_path, sdk_class)
@@ -43,7 +41,9 @@ def _parse_extra_filters(raw_pairs: List[str]) -> Dict[str, Any]:
     filters: Dict[str, Any] = {}
     for pair in raw_pairs:
         if "=" not in pair:
-            raise ValueError(f"Invalid --extra-filters value '{pair}', expected key=value")
+            raise ValueError(
+                f"Invalid --extra-filters value '{pair}', expected key=value"
+            )
         key, value = pair.split("=", 1)
         key = key.strip()
         value = value.strip()
@@ -82,7 +82,13 @@ def _api_url(base_url: str, path: str) -> str:
     return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
-def _fetch_all_matching(base_url: str, headers: Dict[str, str], model: str, filters: Dict[str, Any], timeout: int) -> List[Dict[str, Any]]:
+def _fetch_all_matching(
+    base_url: str,
+    headers: Dict[str, str],
+    model: str,
+    filters: Dict[str, Any],
+    timeout: int,
+) -> List[Dict[str, Any]]:
     """Fetch all matching records using paginated list endpoint for preview/logging."""
     all_items: List[Dict[str, Any]] = []
     url = _api_url(base_url, f"api/{model}/")
@@ -97,7 +103,9 @@ def _fetch_all_matching(base_url: str, headers: Dict[str, str], model: str, filt
         if isinstance(data, dict) and "results" in data:
             results = data.get("results") or []
             if not isinstance(results, list):
-                raise RuntimeError("Unexpected list response format: 'results' is not a list")
+                raise RuntimeError(
+                    "Unexpected list response format: 'results' is not a list"
+                )
             all_items.extend(results)
             url = data.get("next")
             params = {}  # next URL already encodes query params
@@ -110,7 +118,13 @@ def _fetch_all_matching(base_url: str, headers: Dict[str, str], model: str, filt
     return all_items
 
 
-def _bulk_delete(base_url: str, headers: Dict[str, str], model: str, payload: Dict[str, Any], timeout: int) -> requests.Response:
+def _bulk_delete(
+    base_url: str,
+    headers: Dict[str, str],
+    model: str,
+    payload: Dict[str, Any],
+    timeout: int,
+) -> requests.Response:
     endpoint = _api_url(base_url, f"api/{model}/bulk-delete/")
     return requests.delete(endpoint, headers=headers, json=payload, timeout=timeout)
 
@@ -144,14 +158,18 @@ def _sequential_delete(
         endpoint = _api_url(base_url, f"api/{model_path}/{pk}/")
         try:
             if deactivate_first and model_path == "part":
-                patch_response = requests.patch(endpoint, headers=headers, json={"active": False}, timeout=timeout)
+                patch_response = requests.patch(
+                    endpoint, headers=headers, json={"active": False}, timeout=timeout
+                )
                 if patch_response.status_code >= 400:
                     failed += 1
-                    failures.append({
-                        "pk": pk,
-                        "status": patch_response.status_code,
-                        "body": f"deactivate failed: {patch_response.text[:500]}",
-                    })
+                    failures.append(
+                        {
+                            "pk": pk,
+                            "status": patch_response.status_code,
+                            "body": f"deactivate failed: {patch_response.text[:500]}",
+                        }
+                    )
                     continue
 
             response = requests.delete(endpoint, headers=headers, timeout=timeout)
@@ -159,11 +177,13 @@ def _sequential_delete(
                 deleted += 1
             else:
                 failed += 1
-                failures.append({
-                    "pk": pk,
-                    "status": response.status_code,
-                    "body": response.text[:500],
-                })
+                failures.append(
+                    {
+                        "pk": pk,
+                        "status": response.status_code,
+                        "body": response.text[:500],
+                    }
+                )
         except requests.RequestException as exc:
             failed += 1
             failures.append({"pk": pk, "error": repr(exc)})
@@ -175,7 +195,9 @@ def _sequential_delete(
     }
 
 
-def _fetch_all_categories(base_url: str, headers: Dict[str, str], timeout: int) -> List[Dict[str, Any]]:
+def _fetch_all_categories(
+    base_url: str, headers: Dict[str, str], timeout: int
+) -> List[Dict[str, Any]]:
     all_rows: List[Dict[str, Any]] = []
     url = _api_url(base_url, "api/part/category/")
 
@@ -187,7 +209,9 @@ def _fetch_all_categories(base_url: str, headers: Dict[str, str], timeout: int) 
         if isinstance(data, dict) and "results" in data:
             rows = data.get("results") or []
             if not isinstance(rows, list):
-                raise RuntimeError("Unexpected category response format: 'results' is not a list")
+                raise RuntimeError(
+                    "Unexpected category response format: 'results' is not a list"
+                )
             all_rows.extend(rows)
             url = data.get("next")
         elif isinstance(data, list):
@@ -199,7 +223,9 @@ def _fetch_all_categories(base_url: str, headers: Dict[str, str], timeout: int) 
     return all_rows
 
 
-def _category_path(category_id: int, category_map: Dict[int, Dict[str, Any]], memo: Dict[int, str]) -> str:
+def _category_path(
+    category_id: int, category_map: Dict[int, Dict[str, Any]], memo: Dict[int, str]
+) -> str:
     if category_id in memo:
         return memo[category_id]
 
@@ -236,7 +262,9 @@ def _print_categories(categories: List[Dict[str, Any]]) -> None:
         print(line)
 
 
-def _resolve_category_id_by_name(categories: List[Dict[str, Any]], category_name: str) -> int:
+def _resolve_category_id_by_name(
+    categories: List[Dict[str, Any]], category_name: str
+) -> int:
     category_map: Dict[int, Dict[str, Any]] = {}
     for row in categories:
         pk = row.get("pk") or row.get("id")
@@ -292,22 +320,60 @@ def _resolve_category_id_by_name(categories: List[Dict[str, Any]], category_name
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Bulk delete InvenTree objects by category or item list")
-    parser.add_argument("--model", default="part", help="InvenTree model endpoint (default: part)")
-    parser.add_argument("--category-id", type=int, help="Category ID to filter by (e.g. 7)")
-    parser.add_argument("--category-name", help="Category name or full path (e.g. Electronics / Connectors)")
-    parser.add_argument("--list-categories", action="store_true", help="List all InvenTree part categories and exit")
-    parser.add_argument("--items", help="Comma-separated PK list to delete (e.g. 1,10,50)")
-    parser.add_argument("--extra-filters", nargs="*", default=[], help="Additional filters key=value (e.g. active=false)")
+    parser = argparse.ArgumentParser(
+        description="Bulk delete InvenTree objects by category or item list"
+    )
+    parser.add_argument(
+        "--model", default="part", help="InvenTree model endpoint (default: part)"
+    )
+    parser.add_argument(
+        "--category-id", type=int, help="Category ID to filter by (e.g. 7)"
+    )
+    parser.add_argument(
+        "--category-name",
+        help="Category name or full path (e.g. Electronics / Connectors)",
+    )
+    parser.add_argument(
+        "--list-categories",
+        action="store_true",
+        help="List all InvenTree part categories and exit",
+    )
+    parser.add_argument(
+        "--items", help="Comma-separated PK list to delete (e.g. 1,10,50)"
+    )
+    parser.add_argument(
+        "--extra-filters",
+        nargs="*",
+        default=[],
+        help="Additional filters key=value (e.g. active=false)",
+    )
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout seconds")
-    parser.add_argument("--deactivate-first", action="store_true", help="For part model, set active=false before deleting")
-    parser.add_argument("--dry-run", action="store_true", help="Preview matching items only; do not delete")
-    parser.add_argument("--confirm", action="store_true", help="Actually execute bulk delete")
+    parser.add_argument(
+        "--deactivate-first",
+        action="store_true",
+        help="For part model, set active=false before deleting",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview matching items only; do not delete",
+    )
+    parser.add_argument(
+        "--confirm", action="store_true", help="Actually execute bulk delete"
+    )
 
     args = parser.parse_args()
 
-    if not args.list_categories and not args.category_id and not args.category_name and not args.items and not args.extra_filters:
-        print("ERROR: provide at least one of --category-id, --category-name, --items, or --extra-filters")
+    if (
+        not args.list_categories
+        and not args.category_id
+        and not args.category_name
+        and not args.items
+        and not args.extra_filters
+    ):
+        print(
+            "ERROR: provide at least one of --category-id, --category-name, --items, or --extra-filters"
+        )
         return 2
 
     if not args.list_categories and not args.dry_run and not args.confirm:
@@ -365,7 +431,9 @@ def main() -> int:
             return 0
 
         try:
-            args.category_id = _resolve_category_id_by_name(categories, args.category_name)
+            args.category_id = _resolve_category_id_by_name(
+                categories, args.category_name
+            )
             print(f"Resolved category '{args.category_name}' -> id={args.category_id}")
         except Exception as exc:
             print(f"ERROR: {str(exc)}")
@@ -390,7 +458,9 @@ def main() -> int:
             filters["category"] = args.category_id
         filters.update(_parse_extra_filters(args.extra_filters))
         if not filters:
-            print("ERROR: no filters could be determined; provide --category-id, --category-name, or --extra-filters")
+            print(
+                "ERROR: no filters could be determined; provide --category-id, --category-name, or --extra-filters"
+            )
             return 2
         payload["filters"] = filters
 
@@ -400,7 +470,9 @@ def main() -> int:
     # Preview list for visibility and safety.
     try:
         if "filters" in payload:
-            matching = _fetch_all_matching(base_url, headers, model_path, payload["filters"], timeout=args.timeout)
+            matching = _fetch_all_matching(
+                base_url, headers, model_path, payload["filters"], timeout=args.timeout
+            )
             print(f"Matching items: {len(matching)}")
             for row in matching[:20]:
                 pk = row.get("pk") or row.get("id")
@@ -456,14 +528,14 @@ def main() -> int:
             return 0
 
         # Fallback path: filters-only payloads or models without SDK bulkDelete.
-        print(
-            f"Using sequential delete for model '{args.model}'"
-        )
+        print(f"Using sequential delete for model '{args.model}'")
 
         if "items" in payload:
             rows = [{"pk": item_pk} for item_pk in payload["items"]]
         else:
-            rows = _fetch_all_matching(base_url, headers, model_path, payload["filters"], timeout=args.timeout)
+            rows = _fetch_all_matching(
+                base_url, headers, model_path, payload["filters"], timeout=args.timeout
+            )
 
         summary = _sequential_delete(
             base_url,
@@ -473,7 +545,9 @@ def main() -> int:
             timeout=args.timeout,
             deactivate_first=args.deactivate_first,
         )
-        print(f"Sequential delete completed: deleted={summary['deleted']} failed={summary['failed']}")
+        print(
+            f"Sequential delete completed: deleted={summary['deleted']} failed={summary['failed']}"
+        )
         if summary["failed"]:
             print("Failures (up to first 20):")
             for failure in summary["failures"][:20]:

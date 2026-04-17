@@ -5,18 +5,19 @@ without a real install. We force-reload the real module here by temporarily
 removing the stub from sys.modules.
 """
 
+import base64
 import os
 import sys
-import base64
-import pytest
-import yaml
+import unittest
 
 # Force-import the real config_interface (not the conftest stub).
-_stub = sys.modules.pop('kintree.config.config_interface', None)
-from kintree.config import config_interface as _ci
+# The pop must happen BEFORE the import so the real module is loaded.
+_stub = sys.modules.pop("kintree.config.config_interface", None)
+from kintree.config import config_interface as _ci  # noqa: E402
+
 # Restore the stub so other modules still see it.
 if _stub is not None:
-    sys.modules['kintree.config.config_interface'] = _stub
+    sys.modules["kintree.config.config_interface"] = _stub
 
 load_file = _ci.load_file
 dump_file = _ci.dump_file
@@ -31,158 +32,204 @@ FUNCTION_FILTER_KEY = _ci.FUNCTION_FILTER_KEY
 # ---------------------------------------------------------------------------
 # load_file / dump_file
 # ---------------------------------------------------------------------------
-class TestLoadDumpFile:
-    def test_round_trip(self, tmp_path):
-        data = {'key': 'value', 'nested': {'a': 1}}
-        p = str(tmp_path / 'test.yaml')
-        assert dump_file(data, p) is True
-        loaded = load_file(p)
-        assert loaded == data
 
-    def test_load_missing_file(self, tmp_path):
-        assert load_file(str(tmp_path / 'nonexistent.yaml')) is None
 
-    def test_load_invalid_yaml(self, tmp_path):
-        p = tmp_path / 'bad.yaml'
-        p.write_text("key: [invalid\n  yaml: {")
-        assert load_file(str(p)) is None
+class TestLoadDumpFile(unittest.TestCase):
+    def test_round_trip(self):
+        import tempfile
 
-    def test_dump_overwrites(self, tmp_path):
-        p = str(tmp_path / 'test.yaml')
-        dump_file({'a': 1}, p)
-        dump_file({'b': 2}, p)
-        assert load_file(p) == {'b': 2}
+        data = {"key": "value", "nested": {"a": 1}}
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "test.yaml")
+            self.assertTrue(dump_file(data, p))
+            self.assertEqual(load_file(p), data)
+
+    def test_load_missing_file(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(load_file(os.path.join(tmp, "nonexistent.yaml")))
+
+    def test_load_invalid_yaml(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "bad.yaml")
+            with open(p, "w") as f:
+                f.write("key: [invalid\n  yaml: {")
+            self.assertIsNone(load_file(p))
+
+    def test_dump_overwrites(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "test.yaml")
+            dump_file({"a": 1}, p)
+            dump_file({"b": 2}, p)
+            self.assertEqual(load_file(p), {"b": 2})
 
 
 # ---------------------------------------------------------------------------
 # load_user_paths
 # ---------------------------------------------------------------------------
-class TestLoadUserPaths:
-    def test_creates_default_when_missing(self, tmp_path):
-        result = load_user_paths(str(tmp_path))
-        assert 'USER_FILES' in result
-        assert 'USER_CACHE' in result
-        assert os.path.exists(tmp_path / 'settings.yaml')
 
-    def test_reads_existing(self, tmp_path):
-        custom = {'USER_FILES': '/custom/files/', 'USER_CACHE': '/custom/cache/'}
-        dump_file(custom, str(tmp_path / 'settings.yaml'))
-        result = load_user_paths(str(tmp_path))
-        assert result['USER_FILES'] == '/custom/files/'
+
+class TestLoadUserPaths(unittest.TestCase):
+    def test_creates_default_when_missing(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = load_user_paths(tmp)
+            self.assertIn("USER_FILES", result)
+            self.assertIn("USER_CACHE", result)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "settings.yaml")))
+
+    def test_reads_existing(self):
+        import tempfile
+
+        custom = {"USER_FILES": "/custom/files/", "USER_CACHE": "/custom/cache/"}
+        with tempfile.TemporaryDirectory() as tmp:
+            dump_file(custom, os.path.join(tmp, "settings.yaml"))
+            result = load_user_paths(tmp)
+            self.assertEqual(result["USER_FILES"], "/custom/files/")
 
 
 # ---------------------------------------------------------------------------
 # load_inventree_user_settings
 # ---------------------------------------------------------------------------
-class TestLoadInventreeUserSettings:
-    def test_decodes_password(self, tmp_path):
-        pw = base64.b64encode(b'secret').decode()
-        data = {
-            'PASSWORD': pw,
-            'SERVER_ADDRESS': 'http://localhost',
-            'USERNAME': 'admin',
-        }
-        p = str(tmp_path / 'inventree.yaml')
-        dump_file(data, p)
-        result = load_inventree_user_settings(p)
-        assert result['PASSWORD'] == 'secret'
 
-    def test_defaults_added(self, tmp_path):
-        pw = base64.b64encode(b'pw').decode()
-        data = {'PASSWORD': pw}
-        p = str(tmp_path / 'inventree.yaml')
-        dump_file(data, p)
-        result = load_inventree_user_settings(p)
-        assert result['ENABLE_PROXY'] is False
-        assert result['DATASHEET_UPLOAD'] is False
-        assert result['PRICING_UPLOAD'] is False
 
-    def test_proxy_extracted(self, tmp_path):
-        pw = base64.b64encode(b'pw').decode()
-        data = {
-            'PASSWORD': pw,
-            'ENABLE_PROXY': True,
-            'PROXIES': {'https': 'http://proxy:8080'},
-        }
-        p = str(tmp_path / 'inventree.yaml')
-        dump_file(data, p)
-        result = load_inventree_user_settings(p)
-        assert result['PROXY'] == 'http://proxy:8080'
+class TestLoadInventreeUserSettings(unittest.TestCase):
+    def test_decodes_password(self):
+        import tempfile
 
-    def test_missing_file(self, tmp_path):
-        result = load_inventree_user_settings(str(tmp_path / 'nope.yaml'))
-        assert result is None
+        pw = base64.b64encode(b"secret").decode()
+        data = {"PASSWORD": pw, "SERVER_ADDRESS": "http://localhost", "USERNAME": "admin"}
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "inventree.yaml")
+            dump_file(data, p)
+            result = load_inventree_user_settings(p)
+            self.assertEqual(result["PASSWORD"], "secret")
+
+    def test_defaults_added(self):
+        import tempfile
+
+        pw = base64.b64encode(b"pw").decode()
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "inventree.yaml")
+            dump_file({"PASSWORD": pw}, p)
+            result = load_inventree_user_settings(p)
+            self.assertFalse(result["ENABLE_PROXY"])
+            self.assertFalse(result["DATASHEET_UPLOAD"])
+            self.assertFalse(result["PRICING_UPLOAD"])
+
+    def test_proxy_extracted(self):
+        import tempfile
+
+        pw = base64.b64encode(b"pw").decode()
+        data = {"PASSWORD": pw, "ENABLE_PROXY": True, "PROXIES": {"https": "http://proxy:8080"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "inventree.yaml")
+            dump_file(data, p)
+            result = load_inventree_user_settings(p)
+            self.assertEqual(result["PROXY"], "http://proxy:8080")
+
+    def test_missing_file(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = load_inventree_user_settings(os.path.join(tmp, "nope.yaml"))
+            self.assertIsNone(result)
 
 
 # ---------------------------------------------------------------------------
 # load_supplier_categories
 # ---------------------------------------------------------------------------
-class TestLoadSupplierCategories:
-    def _write(self, tmp_path, data):
-        p = str(tmp_path / 'supplier.yaml')
+
+
+class TestLoadSupplierCategories(unittest.TestCase):
+    def _write(self, tmp, data):
+        p = os.path.join(tmp, "supplier.yaml")
         dump_file(data, p)
         return p
 
-    def test_basic_load(self, tmp_path):
-        data = {'Capacitors': {'Ceramic': ['MLCC']}}
-        p = self._write(tmp_path, data)
-        assert load_supplier_categories(p) == data
+    def test_basic_load(self):
+        import tempfile
 
-    def test_clean_removes_filter_prefix(self, tmp_path):
-        data = {'Capacitors': {f'{FUNCTION_FILTER_KEY}Ceramic': ['MLCC']}}
-        p = self._write(tmp_path, data)
-        result = load_supplier_categories(p, clean=True)
-        assert 'Ceramic' in result['Capacitors']
-        assert f'{FUNCTION_FILTER_KEY}Ceramic' not in result['Capacitors']
+        data = {"Capacitors": {"Ceramic": ["MLCC"]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, data)
+            self.assertEqual(load_supplier_categories(p), data)
+
+    def test_clean_removes_filter_prefix(self):
+        import tempfile
+
+        data = {"Capacitors": {f"{FUNCTION_FILTER_KEY}Ceramic": ["MLCC"]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, data)
+            result = load_supplier_categories(p, clean=True)
+            self.assertIn("Ceramic", result["Capacitors"])
+            self.assertNotIn(f"{FUNCTION_FILTER_KEY}Ceramic", result["Capacitors"])
 
 
 # ---------------------------------------------------------------------------
 # load_supplier_categories_inversed
 # ---------------------------------------------------------------------------
-class TestLoadSupplierCategoriesInversed:
-    def test_inversion(self, tmp_path):
-        data = {'Capacitors': {'Ceramic': ['MLCC', 'Disc']}}
-        p = str(tmp_path / 'supplier.yaml')
-        dump_file(data, p)
-        result = load_supplier_categories_inversed(p)
-        assert result['Capacitors']['MLCC'] == 'Ceramic'
-        assert result['Capacitors']['Disc'] == 'Ceramic'
 
-    def test_missing_file(self, tmp_path):
-        result = load_supplier_categories_inversed(str(tmp_path / 'nope.yaml'))
-        assert result is None
+
+class TestLoadSupplierCategoriesInversed(unittest.TestCase):
+    def test_inversion(self):
+        import tempfile
+
+        data = {"Capacitors": {"Ceramic": ["MLCC", "Disc"]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "supplier.yaml")
+            dump_file(data, p)
+            result = load_supplier_categories_inversed(p)
+            self.assertEqual(result["Capacitors"]["MLCC"], "Ceramic")
+            self.assertEqual(result["Capacitors"]["Disc"], "Ceramic")
+
+    def test_missing_file(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = load_supplier_categories_inversed(os.path.join(tmp, "nope.yaml"))
+            self.assertIsNone(result)
 
 
 # ---------------------------------------------------------------------------
 # load_category_parameters
 # ---------------------------------------------------------------------------
-class TestLoadCategoryParameters:
-    def test_basic_mapping(self, tmp_path):
+
+
+class TestLoadCategoryParameters(unittest.TestCase):
+    def test_basic_mapping(self):
+        import tempfile
+
         data = {
-            'Capacitors': {
-                'Capacitance': ['Cap', 'Capacitance Value'],
-                'Voltage': ['Rated Voltage'],
+            "Capacitors": {
+                "Capacitance": ["Cap", "Capacitance Value"],
+                "Voltage": ["Rated Voltage"],
             }
         }
-        p = str(tmp_path / 'params.yaml')
-        dump_file(data, p)
-        result = load_category_parameters(['Capacitors'], p)
-        assert result['Cap'] == 'Capacitance'
-        assert result['Capacitance Value'] == 'Capacitance'
-        assert result['Rated Voltage'] == 'Voltage'
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "params.yaml")
+            dump_file(data, p)
+            result = load_category_parameters(["Capacitors"], p)
+            self.assertEqual(result["Cap"], "Capacitance")
+            self.assertEqual(result["Capacitance Value"], "Capacitance")
+            self.assertEqual(result["Rated Voltage"], "Voltage")
 
-    def test_parent_inheritance(self, tmp_path):
+    def test_parent_inheritance(self):
+        import tempfile
+
         data = {
-            'Passives': {
-                'Package': ['Package Type'],
-            },
-            'Capacitors': {
-                'parent': ['Passives'],
-                'Capacitance': ['Cap'],
-            },
+            "Passives": {"Package": ["Package Type"]},
+            "Capacitors": {"parent": ["Passives"], "Capacitance": ["Cap"]},
         }
-        p = str(tmp_path / 'params.yaml')
-        dump_file(data, p)
-        result = load_category_parameters(['Capacitors'], p)
-        assert result['Package Type'] == 'Package'
-        assert result['Cap'] == 'Capacitance'
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "params.yaml")
+            dump_file(data, p)
+            result = load_category_parameters(["Capacitors"], p)
+            self.assertEqual(result["Package Type"], "Package")
+            self.assertEqual(result["Cap"], "Capacitance")
