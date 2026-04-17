@@ -1678,8 +1678,11 @@ class PickupView(MainView):
 
         self._history_table.rows = rows
         try:
-            self._history_section.update()
-            self._history_table.update()
+            # Only update if added to the page
+            if getattr(self._history_section, "page", None) is not None:
+                self._history_section.update()
+            if getattr(self._history_table, "page", None) is not None:
+                self._history_table.update()
         except Exception:
             import logging
 
