@@ -846,7 +846,7 @@ class PartSearchView(MainView):
                 _make_enable_event(self._kicad_view, settings.ENABLE_KICAD)
             )
             self._create_view.reset_progress_bars()
-        return super().did_mount(enable)
+        return super().did_mount()
 
 
 class InventreeView(MainView):
