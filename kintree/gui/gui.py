@@ -1,4 +1,6 @@
 import os
+import time
+import threading
 import flet as ft
 
 from ..config import settings
@@ -48,8 +50,8 @@ def init_gui(page: ft.Page):
     page.window.title_bar_hidden = False
     page.window.maximizable = True
     page.window.resizable = True
-    # Start hidden so the window is fully composed before it appears, avoiding
-    # the intermittent half-rendered / black-box artifact on Windows startup.
+    # Keep the window hidden until the first route has fully rendered.
+    # This prevents the half-rendered / black-box artifact on Windows startup.
     page.window.visible = False
 
     # Reflow when the window is resized / restored.
@@ -62,13 +64,6 @@ def init_gui(page: ft.Page):
     # to show the user that the app is busy doing something
     page.splash = ft.ProgressBar(visible=False)
 
-    # Update
-    page.update()
-    _stabilize_layout(page)
-
-    # Now show the window maximized — all controls are already laid out.
-    page.window.maximized = True
-    page.window.visible = True
     page.update()
 
 
@@ -185,3 +180,18 @@ def kintree_gui(page: ft.Page):
     page.on_view_pop = view_pop
 
     page.go(page.route or '/')
+
+    # Reveal the window after the first route has been rendered.
+    # A short delay on a background thread gives the Flutter engine time to
+    # finish compositing the first frame before the OS shows the window,
+    # eliminating the half-rendered / black-box artifact on Windows.
+    def _reveal():
+        time.sleep(0.25)
+        try:
+            page.window.maximized = True
+            page.window.visible = True
+            page.update()
+        except Exception:
+            pass
+
+    threading.Thread(target=_reveal, daemon=True).start()

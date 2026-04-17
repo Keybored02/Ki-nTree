@@ -3163,9 +3163,10 @@ class BarcodeImportView(MainView):
 
                 category_tree = inventree_interface.split_category_tree(row.category) if row.category else []
 
+                part_name = row.manufacturer_pn or row.search_name
                 if not supplier_data:
                     part_form = {
-                        'name': row.search_name,
+                        'name': part_name,
                         'description': f'Imported from {row.supplier.upper()}',
                         'category_tree': category_tree,
                     }
@@ -3174,7 +3175,7 @@ class BarcodeImportView(MainView):
                         supplier=supplier_name,
                         part_info=supplier_data,
                     )
-                    part_form['name'] = row.search_name
+                    part_form['name'] = part_name
 
                 if category_tree:
                     part_form['category_tree'] = category_tree
