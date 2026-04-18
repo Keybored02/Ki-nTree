@@ -621,36 +621,34 @@ def translate_supplier_to_form(supplier: str, part_info: dict) -> dict:
 
     # Default revision
     revision = settings.CONFIG_IPN.get("INVENTREE_DEFAULT_REV", "")
+
     # Translate supplier data to form fields
-    part_form["name"] = get_value_from_user_key(
-        "SEARCH_NAME", default_search_keys[0], default_value=""
-    )
+    def _key(idx):
+        return default_search_keys[idx] if idx < len(default_search_keys) else ""
+
+    part_form["name"] = get_value_from_user_key("SEARCH_NAME", _key(0), default_value="")
     part_form["description"] = get_value_from_user_key(
-        "SEARCH_DESCRIPTION", default_search_keys[1], default_value=""
+        "SEARCH_DESCRIPTION", _key(1), default_value=""
     )
     part_form["revision"] = get_value_from_user_key(
-        "SEARCH_REVISION", default_search_keys[2], default_value=revision
+        "SEARCH_REVISION", _key(2), default_value=revision
     )
-    part_form["keywords"] = get_value_from_user_key(
-        "SEARCH_KEYWORDS", default_search_keys[3], default_value=""
-    )
+    part_form["keywords"] = get_value_from_user_key("SEARCH_KEYWORDS", _key(3), default_value="")
     part_form["supplier_name"] = settings.CONFIG_SUPPLIERS[supplier]["name"]
     part_form["supplier_part_number"] = get_value_from_user_key(
-        "SEARCH_SKU", default_search_keys[4], default_value=""
+        "SEARCH_SKU", _key(4), default_value=""
     )
     part_form["supplier_link"] = get_value_from_user_key(
-        "SEARCH_SUPPLIER_URL", default_search_keys[7], default_value=""
+        "SEARCH_SUPPLIER_URL", _key(7), default_value=""
     )
     part_form["manufacturer_name"] = get_value_from_user_key(
-        "SEARCH_MANUFACTURER", default_search_keys[5], default_value=""
+        "SEARCH_MANUFACTURER", _key(5), default_value=""
     )
     part_form["manufacturer_part_number"] = get_value_from_user_key(
-        "SEARCH_MPN", default_search_keys[6], default_value=""
+        "SEARCH_MPN", _key(6), default_value=""
     )
-    part_form["datasheet"] = get_value_from_user_key(
-        "SEARCH_DATASHEET", default_search_keys[8], default_value=""
-    )
-    part_form["image"] = get_value_from_user_key("", default_search_keys[9], default_value="")
+    part_form["datasheet"] = get_value_from_user_key("SEARCH_DATASHEET", _key(8), default_value="")
+    part_form["image"] = get_value_from_user_key("", _key(9), default_value="")
 
     return part_form
 

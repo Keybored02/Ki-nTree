@@ -33,6 +33,10 @@ PRICING_MAP = [
 
 def get_default_search_keys():
     return [
+        "ManufacturerPartNumber",
+        "Description",
+        "revision",
+        "keywords",
         "MouserPartNumber",
         "Manufacturer",
         "ManufacturerPartNumber",
@@ -185,7 +189,7 @@ def fetch_part_info(part_number: str) -> dict:
             cprint(f"[INFO] Warning: {error_message}", silent=False)
         finally:
             # Mouser 0.1.6 API update: single part list is returned, instead of dict
-            pass
+            return request.get_clean_response()[0]  # noqa: B012
 
     # Query part number
     try:
