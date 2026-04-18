@@ -294,7 +294,8 @@ class MainView(CommonView):
 
         # Sanitize data before pushing
         self.sanitize_data()
-        # Barcode fetch logic removed due to undefined variables and unused assignment
+        # Push to shared data store
+        data_from_views[self.title] = self.data
 
 
 def _safe_update(ctrl):
