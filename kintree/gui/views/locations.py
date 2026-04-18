@@ -13,20 +13,63 @@ from ...common.tools import cprint
 from ...database import inventree_interface
 from ...search.barcode_parser import BarcodeParser
 from .barcode import BarcodeApiMixin
-from .barcode import ExistingPartScanRow
+from .barcode import _BarcodeApiHelpers
 from .common import DialogType
 from .common import DropdownWithSearch
 from .common import GUI_PARAMS
 from .main import MainView
 
 
+class LocationScanRow:
+    """A scanned location to be re-parented."""
+
+    def __init__(self, row_id: int, raw_code: str, location_path: str, location_pk: int):
+        self.row_id = row_id
+        self.raw_code = raw_code
+        self.location_path = location_path
+        self.location_pk = location_pk
+        self.status = "Ready"
+
+
+class StockItemRow:
+    """A single stock item to be moved."""
+
+    def __init__(
+        self,
+        row_id: int,
+        raw_code: str,
+        stock_pk: int,
+        part_name: str,
+        supplier: str,
+        quantity: str,
+        current_location: str,
+    ):
+        self.row_id = row_id
+        self.raw_code = raw_code
+        self.stock_pk = stock_pk
+        self.part_name = part_name
+        self.supplier = supplier
+        self.quantity = quantity
+        self.current_location = current_location
+        self.status = "Ready"
+
+
+class PendingRow:
+    """A scanned code still being resolved."""
+
+    def __init__(self, row_id: int, raw_code: str, supplier: str, lookup_value: str):
+        self.row_id = row_id
+        self.raw_code = raw_code
+        self.supplier = supplier
+        self.lookup_value = lookup_value
+        self.status = "Resolving..."
+
+
 class LocationsView(BarcodeApiMixin, MainView):
-    """Manage stock location hierarchy and move items to locations."""
+    """Move stock items and sub-locations to a destination location."""
 
     title = "Locations"
     fields = {}
-
-    _ROOT_LABEL = "(root)"
 
     def __init__(self, page: ft.Page):
         self.stock_locations: List[str] = []
@@ -34,9 +77,10 @@ class LocationsView(BarcodeApiMixin, MainView):
         self._connect_lock = threading.Lock()
         self._http = requests.Session()
 
-        # Scan/resolve state (section 2)
         self.parser = BarcodeParser()
-        self.scanned_rows: List[ExistingPartScanRow] = []
+        self.pending_rows: List[PendingRow] = []
+        self.stock_rows: List[StockItemRow] = []
+        self.location_rows: List[LocationScanRow] = []
         self._row_counter = 0
         self._rows_lock = threading.Lock()
         self._recent_scan_codes: Dict[str, float] = {}
@@ -59,49 +103,14 @@ class LocationsView(BarcodeApiMixin, MainView):
     # ------------------------------------------------------------------ #
 
     def build_page(self) -> None:
-        # --- Section 1: Reassign locations ---
-        self.fields["source_location"] = DropdownWithSearch(
-            label="Location To Move",
-            dr_width=GUI_PARAMS["textfield_width"],
-            sr_width=GUI_PARAMS["searchfield_width"],
-            dense=GUI_PARAMS["textfield_dense"],
-            options=[],
-        )
-        self.fields["target_parent"] = DropdownWithSearch(
-            label="New Parent Location",
-            dr_width=GUI_PARAMS["textfield_width"],
-            sr_width=GUI_PARAMS["searchfield_width"],
-            dense=GUI_PARAMS["textfield_dense"],
-            options=[],
-        )
-        self.fields["reload_locations_s1"] = ft.IconButton(
-            icon=ft.icons.REPLAY,
-            tooltip="Reload stock locations from InvenTree",
-            on_click=self._reload_locations_s1,
-        )
-        self.fields["clear_selection"] = ft.IconButton(
-            icon=ft.icons.CLEAR,
-            tooltip="Clear selected source/parent",
-            on_click=self._clear_selection,
-        )
-        self.fields["move_button"] = ft.ElevatedButton(
-            text="Move",
-            on_click=self._on_move,
-            color="white",
-            bgcolor="green",
-            width=120,
-        )
-        self.fields["status_s1"] = ft.Text(value="", size=12, color="blue")
-
-        # --- Section 2: Move items to a location ---
         self.fields["barcode_input"] = ft.TextField(
-            label="Scan barcode / part number",
+            label="Scan barcode / part number / location name",
             multiline=True,
             min_lines=3,
             max_lines=6,
             on_submit=self._on_code_submit,
             on_change=self._on_code_changed,
-            hint_text="Scan one code per line. Part, supplier part, or stock item barcodes accepted.",
+            hint_text="Scan one code per line. Parts, stock items, or location names accepted.",
         )
         self.fields["parse_codes"] = ft.ElevatedButton(
             text="Parse Codes",
@@ -109,10 +118,7 @@ class LocationsView(BarcodeApiMixin, MainView):
         )
         self.fields["clear_input"] = ft.ElevatedButton(
             text="Clear Input",
-            on_click=lambda _: (
-                setattr(self.fields["barcode_input"], "value", "")
-                or self.fields["barcode_input"].update()
-            ),
+            on_click=self._on_clear_input,
         )
         self.fields["clear_all_rows"] = ft.IconButton(
             icon=ft.icons.DELETE_SWEEP,
@@ -121,12 +127,12 @@ class LocationsView(BarcodeApiMixin, MainView):
         )
         self.fields["results_table"] = ft.DataTable(
             columns=[
-                ft.DataColumn(ft.Text("Input Code")),
+                ft.DataColumn(ft.Text("Type")),
+                ft.DataColumn(ft.Text("Part / Location")),
                 ft.DataColumn(ft.Text("Supplier")),
-                ft.DataColumn(ft.Text("Lookup")),
-                ft.DataColumn(ft.Text("Status")),
-                ft.DataColumn(ft.Text("Part")),
+                ft.DataColumn(ft.Text("Qty")),
                 ft.DataColumn(ft.Text("Current Location")),
+                ft.DataColumn(ft.Text("Status")),
                 ft.DataColumn(ft.Text("Remove")),
             ],
             rows=[],
@@ -139,48 +145,27 @@ class LocationsView(BarcodeApiMixin, MainView):
             dense=GUI_PARAMS["textfield_dense"],
             options=[],
         )
-        self.fields["reload_locations_s2"] = ft.IconButton(
+        self.fields["reload_locations"] = ft.IconButton(
             icon=ft.icons.REPLAY,
             tooltip="Reload stock locations from InvenTree",
-            on_click=self._reload_locations_s2,
+            on_click=self._reload_locations,
         )
         self.fields["apply_button"] = ft.ElevatedButton(
-            text="Apply",
+            text="Move",
+            icon=ft.icons.DRIVE_FILE_MOVE,
             on_click=self._on_apply,
             color="white",
             bgcolor="green",
-            width=120,
         )
         self.fields["progress"] = ft.ProgressBar(value=0, visible=False, height=8)
         self.fields["progress_message"] = ft.Text(value="", size=11, color="blue")
-        self.fields["status_s2"] = ft.Text(value="", size=12, color="blue")
+        self.fields["status"] = ft.Text(value="", size=12, color="blue")
 
         self.column = ft.Column(
             controls=[
                 ft.Container(
                     content=ft.Column(
                         controls=[
-                            # Section 1
-                            ft.Text(
-                                "Reassign Locations",
-                                style=ft.TextThemeStyle.HEADLINE_SMALL,
-                            ),
-                            ft.Row(
-                                [
-                                    self.fields["source_location"],
-                                    self.fields["reload_locations_s1"],
-                                ]
-                            ),
-                            ft.Row(
-                                [
-                                    self.fields["target_parent"],
-                                    self.fields["clear_selection"],
-                                ]
-                            ),
-                            ft.Row([self.fields["move_button"]]),
-                            self.fields["status_s1"],
-                            ft.Divider(height=24),
-                            # Section 2
                             ft.Text(
                                 "Move Items to Location",
                                 style=ft.TextThemeStyle.HEADLINE_SMALL,
@@ -193,17 +178,17 @@ class LocationsView(BarcodeApiMixin, MainView):
                                     self.fields["clear_all_rows"],
                                 ]
                             ),
-                            ft.Container(content=self.fields["results_table"], expand=True),
+                            ft.Container(content=self.fields["results_table"]),
                             ft.Row(
                                 [
                                     self.fields["location_select"],
-                                    self.fields["reload_locations_s2"],
+                                    self.fields["reload_locations"],
                                 ]
                             ),
                             ft.Row([self.fields["apply_button"]]),
                             self.fields["progress"],
                             self.fields["progress_message"],
-                            self.fields["status_s2"],
+                            self.fields["status"],
                         ],
                         scroll=ft.ScrollMode.AUTO,
                         spacing=10,
@@ -220,51 +205,65 @@ class LocationsView(BarcodeApiMixin, MainView):
             self.fields["barcode_input"].focus()
             self.fields["barcode_input"].update()
         except Exception:
-            import logging
-
-            logging.exception("Exception focusing/updating barcode_input field:")
+            pass
 
     def did_mount(self):
-        self._load_locations(reload=False)
-        self.focus_input()
+        threading.Thread(target=self._load_locations, args=(False,), daemon=True).start()
         return super().did_mount()
 
+    def nav_rail_redirect(self, e):
+        field = self.fields.get("location_select")
+        if field:
+            field.reset_search_state()
+        super().nav_rail_redirect(e)
+
+    def will_unmount(self):
+        field = self.fields.get("location_select")
+        if field:
+            field.reset_search_state()
+        return super().will_unmount()
+
     # ------------------------------------------------------------------ #
-    #  Shared: location loading                                            #
+    #  Location loading                                                    #
     # ------------------------------------------------------------------ #
 
     def _load_locations(self, reload: bool = False):
         try:
-            location_list = inventree_interface.build_stock_location_tree(reload=reload)
+            if reload:
+                inventree_interface.reload_location_cache()
+            location_list = inventree_interface.get_cached_location_tree()
             self.stock_locations = list(location_list)
-            self.stock_location_id_map = inventree_interface.get_stock_location_id_map() or {}
+            self.stock_location_id_map = inventree_interface.get_cached_location_id_map() or {}
 
-            source_options = [ft.dropdown.Option(loc) for loc in self.stock_locations]
-            target_options = [ft.dropdown.Option(self._ROOT_LABEL)] + source_options
+            loc_opts = [ft.dropdown.Option(loc) for loc in self.stock_locations]
 
-            self.fields["source_location"].options = source_options
-            self.fields["target_parent"].options = target_options
-            self.fields["source_location"].disabled = False
-            self.fields["target_parent"].disabled = False
-            self.fields["source_location"].done_search()
-            self.fields["target_parent"].done_search()
-
-            loc_options = [ft.dropdown.Option(loc) for loc in self.stock_locations]
-            self.fields["location_select"].options = loc_options
-            self.fields["location_select"].disabled = False
-            self.fields["location_select"].done_search()
-
-            # Rebuild path caches for section 2 item resolution
             self._location_path_map_loaded = False
             self._location_name_cache.clear()
             self._location_path_to_pk_cache.clear()
             self._location_pk_to_path_cache.clear()
             self._location_path_to_pk_cache = dict(self.stock_location_id_map)
 
-            self._page.update()
+            def _apply():
+                if not self.page:
+                    return
+                self.fields["location_select"].options = loc_opts
+                self.fields["location_select"].set_enabled(True)
+                self.fields["location_select"].reset_search_state()
+                self.page.update()
+
+            page = self.page
+            if page:
+                page.run_thread(_apply)
+
         except Exception as exc:
             cprint(f"[LOCATIONS] Failed to load stock locations: {exc}", silent=False)
-            self._show_status_s1("Failed to load stock locations", color="red")
+
+    def _reload_locations(self, _):
+        if not self._connect_server_with_retries():
+            self.show_dialog(DialogType.ERROR, "Failed to connect to InvenTree server")
+            return
+        threading.Thread(target=self._load_locations, args=(True,), daemon=True).start()
+        self._show_status("Reloading...", color="blue")
 
     def _connect_server_with_retries(self, attempts: int = 3, delay_seconds: float = 1.5) -> bool:
         api_obj = getattr(inventree_interface.inventree_api, "inventree_api", None)
@@ -301,9 +300,7 @@ class LocationsView(BarcodeApiMixin, MainView):
                 try:
                     status_code = int(getattr(getattr(exc, "response", None), "status_code", 0))
                 except Exception:
-                    import logging
-
-                    logging.exception("Exception extracting status_code from response:")
+                    pass
                 if status_code and 400 <= status_code < 500 and status_code != 429:
                     return None
                 if attempt < attempts:
@@ -313,124 +310,24 @@ class LocationsView(BarcodeApiMixin, MainView):
         return None
 
     # ------------------------------------------------------------------ #
-    #  Section 1: Reassign locations                                       #
+    #  Status                                                              #
     # ------------------------------------------------------------------ #
 
-    def _show_status_s1(self, message: str, color: str = "black"):
-        self.fields["status_s1"].value = message
-        self.fields["status_s1"].color = color
+    def _show_status(self, message: str, color: str = "black"):
+        self.fields["status"].value = message
+        self.fields["status"].color = color
         try:
-            self.fields["status_s1"].update()
+            self.fields["status"].update()
         except AssertionError:
             pass
 
-    def _reload_locations_s1(self, _):
-        if not self._connect_server_with_retries():
-            self.show_dialog(DialogType.ERROR, "Failed to connect to InvenTree server")
-            return
-        self._load_locations(reload=True)
-        self._show_status_s1("Stock locations reloaded", color="green")
-
-    def _clear_selection(self, _):
-        self.fields["source_location"].value = None
-        self.fields["target_parent"].value = None
-        try:
-            self.fields["source_location"].update()
-            self.fields["target_parent"].update()
-        except AssertionError:
-            pass
-        self._show_status_s1("Selection cleared", color="blue")
-
-    def _on_move(self, _):
-        source = str(self.fields["source_location"].value or "").strip()
-        target = str(self.fields["target_parent"].value or "").strip()
-
-        if not source:
-            self.show_dialog(DialogType.ERROR, "Select source location")
-            return
-        if not target:
-            self.show_dialog(DialogType.ERROR, "Select target parent location")
-            return
-        if target != self._ROOT_LABEL and source == target:
-            self.show_dialog(DialogType.ERROR, "Source and target parent cannot be the same")
-            return
-        if target != self._ROOT_LABEL and target.startswith(f"{source}/"):
-            self.show_dialog(DialogType.ERROR, "Cannot move a location into its own child")
-            return
-
-        if not self._connect_server_with_retries():
-            self.show_dialog(
-                DialogType.ERROR, "Failed to connect to InvenTree server after retries"
-            )
-            return
-
-        source_pk = inventree_interface.resolve_stock_location_pk(
-            source, self.stock_location_id_map
-        )
-        if source_pk <= 0:
-            self.show_dialog(DialogType.ERROR, f"Source location not found: {source}")
-            return
-
-        if target == self._ROOT_LABEL:
-            parent_pk = None
-        else:
-            parent_pk = inventree_interface.resolve_stock_location_pk(
-                target, self.stock_location_id_map
-            )
-            if parent_pk <= 0:
-                self.show_dialog(DialogType.ERROR, f"Target parent not found: {target}")
-                return
-
-        api_obj = getattr(inventree_interface.inventree_api, "inventree_api", None)
-        token = getattr(api_obj, "token", None) if api_obj else None
-        base_url = getattr(api_obj, "base_url", "") if api_obj else ""
-        if not token or not base_url:
-            self.show_dialog(DialogType.ERROR, "InvenTree auth context unavailable")
-            return
-
-        endpoint = f"{base_url.rstrip('/')}/api/stock/location/{int(source_pk)}/"
-        headers = {
-            "Authorization": f"Token {token}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
-        try:
-            response = self._http.patch(
-                endpoint, headers=headers, json={"parent": parent_pk}, timeout=20
-            )
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            body = ""
-            try:
-                body = exc.response.text[:300] if exc.response is not None else ""
-            except Exception:
-                import logging
-
-                logging.exception("Exception extracting error body from response:")
-            self.show_dialog(DialogType.ERROR, f"Failed to move location: {exc}\n{body}")
-            return
-
-        self._show_status_s1("Location moved successfully", color="green")
-        self._load_locations(reload=True)
-
     # ------------------------------------------------------------------ #
-    #  Section 2: Move items to location                                   #
+    #  Input handling                                                      #
     # ------------------------------------------------------------------ #
 
-    def _show_status_s2(self, message: str, color: str = "black"):
-        self.fields["status_s2"].value = message
-        self.fields["status_s2"].color = color
-        try:
-            self.fields["status_s2"].update()
-        except AssertionError:
-            pass
-
-    def _reload_locations_s2(self, _):
-        if not self._connect_server_with_retries():
-            self.show_dialog(DialogType.ERROR, "Failed to connect to InvenTree server")
-            return
-        self._load_locations(reload=True)
-        self._show_status_s2("Stock locations reloaded", color="green")
+    def _on_clear_input(self, _):
+        self.fields["barcode_input"].value = ""
+        self.fields["barcode_input"].update()
 
     def _on_code_submit(self, _):
         text = (self.fields["barcode_input"].value or "").strip()
@@ -452,12 +349,12 @@ class LocationsView(BarcodeApiMixin, MainView):
         self._update_results_table()
         self.fields["barcode_input"].value = ""
         self.fields["barcode_input"].update()
-        self._show_status_s2(f"Queued {success} item(s) for validation", color="blue")
+        self._show_status(f"Queued {success} code(s) for resolution", color="blue")
 
     def _parse_batch_codes(self, _):
         text = (self.fields["barcode_input"].value or "").strip()
         if not text:
-            self._show_status_s2("No input provided", color="red")
+            self._show_status("No input provided", color="red")
             return
         lines = [line.strip() for line in text.split("\n") if line.strip()]
         success = 0
@@ -467,15 +364,14 @@ class LocationsView(BarcodeApiMixin, MainView):
         self._update_results_table()
         self.fields["barcode_input"].value = ""
         self.fields["barcode_input"].update()
-        self._show_status_s2(f"Queued {success} item(s) for validation", color="blue")
+        self._show_status(f"Queued {success} code(s) for resolution", color="blue")
 
     def _enqueue_code(self, raw_code: str, update_table: bool = True) -> bool:
         code = str(raw_code or "").strip()
         if not code:
             return False
         now = time.monotonic()
-        recent_ts = self._recent_scan_codes.get(code)
-        if recent_ts is not None and (now - recent_ts) < 0.5:
+        if self._recent_scan_codes.get(code) and (now - self._recent_scan_codes[code]) < 0.5:
             return False
         self._recent_scan_codes[code] = now
 
@@ -490,29 +386,32 @@ class LocationsView(BarcodeApiMixin, MainView):
 
         with self._rows_lock:
             self._row_counter += 1
-            row = ExistingPartScanRow(
+            row = PendingRow(
                 row_id=self._row_counter,
                 raw_code=code,
                 supplier=supplier,
                 lookup_value=lookup_value,
             )
-            self.scanned_rows.append(row)
+            self.pending_rows.append(row)
 
         if update_table:
             self._update_results_table()
 
-        thread = threading.Thread(target=self._validate_row_async, args=(row.row_id,), daemon=True)
-        thread.start()
+        threading.Thread(target=self._resolve_code_async, args=(row.row_id,), daemon=True).start()
         return True
 
-    def _validate_row_async(self, row_id: int):
+    # ------------------------------------------------------------------ #
+    #  Async resolution                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _resolve_code_async(self, row_id: int):
         with self._rows_lock:
-            row = next((r for r in self.scanned_rows if r.row_id == row_id), None)
+            row = next((r for r in self.pending_rows if r.row_id == row_id), None)
         if not row:
             return
 
         try:
-            row.status = "Checking server..."
+            row.status = "Connecting..."
             self._update_results_table_throttled()
 
             if not self._connect_server_with_retries(attempts=3, delay_seconds=1.0):
@@ -520,111 +419,267 @@ class LocationsView(BarcodeApiMixin, MainView):
                 self._update_results_table_throttled(force=True)
                 return
 
-            row.status = "Checking part..."
-            self._update_results_table_throttled()
-
-            part = self._find_part_by_lookup(row.lookup_value)
-            if not part:
-                row.status = "Part not found"
+            api_obj = getattr(inventree_interface.inventree_api, "inventree_api", None)
+            token = getattr(api_obj, "token", None) if api_obj else None
+            base_url = getattr(api_obj, "base_url", "") if api_obj else ""
+            if not token or not base_url:
+                row.status = "No auth"
                 self._update_results_table_throttled(force=True)
                 return
 
-            row.part_pk = int(part.get("pk") or part.get("id"))
-            row.part_name = str(part.get("name") or part.get("IPN") or row.lookup_value)
-            try:
-                row.default_location_pk = int(part.get("default_location") or 0)
-            except Exception:
-                row.default_location_pk = 0
+            headers = {"Authorization": f"Token {token}", "Accept": "application/json"}
 
-            row.location = self._resolve_location_string(part)
+            # 1. Try location by name
+            row.status = "Checking location..."
+            self._update_results_table_throttled()
+            loc = self._find_location_by_name(row.lookup_value, headers, base_url)
+            if loc:
+                loc_pk = int(loc.get("pk") or loc.get("id"))
+                loc_path = loc.get("pathstring") or loc.get("name") or row.lookup_value
+                with self._rows_lock:
+                    self.pending_rows = [r for r in self.pending_rows if r.row_id != row_id]
+                    self._row_counter += 1
+                    loc_row = LocationScanRow(
+                        row_id=row_id,
+                        raw_code=row.raw_code,
+                        location_path=loc_path,
+                        location_pk=loc_pk,
+                    )
+                    self.location_rows.append(loc_row)
+                self._update_results_table_throttled(force=True)
+                return
 
-            has_location = bool(row.location and row.location not in ("-", "None", "none"))
-            row.status = "Ready" if has_location else "Missing location"
+            # 2. Try part — use supplier info if available
+            row.status = "Checking part..."
+            self._update_results_table_throttled()
+
+            part = None
+            if row.supplier != "unknown":
+                sp = (
+                    _BarcodeApiHelpers.find_supplier_part_for_row_static(
+                        self, [row.lookup_value], row.supplier
+                    )
+                    if hasattr(_BarcodeApiHelpers, "find_supplier_part_for_row_static")
+                    else None
+                )
+                if sp is None:
+                    # fall back via instance method
+                    try:
+                        sp = self._find_supplier_part_for_row([row.lookup_value], row.supplier)
+                    except Exception:
+                        sp = None
+                if sp:
+                    part_ref = sp.get("part") or sp.get("part_detail")
+                    part_pk = int(
+                        part_ref.get("pk") or part_ref.get("id")
+                        if isinstance(part_ref, dict)
+                        else part_ref or 0
+                    )
+                    if part_pk:
+                        resp = self._request_with_retries(
+                            method="GET",
+                            url=f"{base_url.rstrip('/')}/api/part/{part_pk}/",
+                            headers=headers,
+                            timeout=20,
+                        )
+                        if resp:
+                            part = resp.json()
+
+            if part is None:
+                part = _BarcodeApiHelpers.find_part_by_lookup(self, row.lookup_value)
+
+            if not part:
+                row.status = "Not found"
+                self._update_results_table_throttled(force=True)
+                return
+
+            part_pk = int(part.get("pk") or part.get("id"))
+            part_name = str(part.get("name") or part.get("IPN") or row.lookup_value)
+
+            # 3. Fetch all stock items for this part
+            row.status = "Fetching stock..."
+            self._update_results_table_throttled()
+
+            stock_items = self._fetch_stock_items(part_pk, headers, base_url)
+
+            if not stock_items:
+                row.status = "No stock"
+                self._update_results_table_throttled(force=True)
+                return
+
+            # Build reverse map pk→path from local cache (may be empty if not yet loaded)
+            pk_to_path = {v: k for k, v in self.stock_location_id_map.items()}
+
+            # Build one StockItemRow per stock item
+            new_stock_rows = []
+            for si in stock_items:
+                si_pk = int(si.get("pk") or si.get("id") or 0)
+                if not si_pk:
+                    continue
+                qty = str(si.get("quantity") or "0")
+                loc_detail = si.get("location_detail") or {}
+                raw_loc = si.get("location")
+                try:
+                    raw_loc_int = int(raw_loc) if raw_loc is not None else -1
+                except Exception:
+                    raw_loc_int = -1
+                loc_name = (
+                    loc_detail.get("pathstring")
+                    or loc_detail.get("name")
+                    or pk_to_path.get(raw_loc_int)
+                    or str(raw_loc or "-")
+                )
+                with self._rows_lock:
+                    self._row_counter += 1
+                    new_stock_rows.append(
+                        StockItemRow(
+                            row_id=self._row_counter,
+                            raw_code=row.raw_code,
+                            stock_pk=si_pk,
+                            part_name=part_name,
+                            supplier=row.supplier if row.supplier != "unknown" else "",
+                            quantity=qty,
+                            current_location=loc_name,
+                        )
+                    )
+
+            with self._rows_lock:
+                self.pending_rows = [r for r in self.pending_rows if r.row_id != row_id]
+                self.stock_rows.extend(new_stock_rows)
+
+            self._update_results_table_throttled(force=True)
+
         except Exception as exc:
-            row.status = f"Error: {str(exc)[:40]}"
+            import traceback
 
-        self._update_results_table_throttled(force=True)
+            cprint(
+                f"[LOCATIONS] Error resolving row {row_id}: {traceback.format_exc()}", silent=False
+            )
+            row.status = f"Error: {str(exc)[:40]}"
+            self._update_results_table_throttled(force=True)
+
+    def _find_supplier_part_for_row(
+        self, lookup_values: List[str], supplier_key: str
+    ) -> Optional[Dict]:
+        """Delegate to BarcodeApiMixin via instance (needs self._request_with_retries etc.)"""
+        # _BarcodeApiHelpers methods are unbound — call via the mixin on self
+        supplier_norm = str(supplier_key or "").strip().lower()
+        # supplier_aliases = _BarcodeApiHelpers.PO_SUPPLIER_NAME_MAP.get(supplier_norm, [supplier_key])
+        supplier_pk = _BarcodeApiHelpers.resolve_supplier_company_pk(self, supplier_norm)
+        if supplier_pk <= 0:
+            return None
+
+        api_obj = getattr(inventree_interface.inventree_api, "inventree_api", None)
+        token = getattr(api_obj, "token", None) if api_obj else None
+        base_url = getattr(api_obj, "base_url", "") if api_obj else ""
+        if not token or not base_url:
+            return None
+
+        headers = {"Authorization": f"Token {token}", "Accept": "application/json"}
+        for probe in lookup_values:
+            resp = self._request_with_retries(
+                method="GET",
+                url=f"{base_url.rstrip('/')}/api/company/part/",
+                headers=headers,
+                params={"supplier": int(supplier_pk), "search": probe, "limit": 10},
+                timeout=20,
+            )
+            if not resp:
+                continue
+            payload = resp.json()
+            rows = payload.get("results", payload) if isinstance(payload, dict) else payload
+            for candidate in rows if isinstance(rows, list) else []:
+                if int(candidate.get("pk") or candidate.get("id") or 0) > 0:
+                    return candidate
+        return None
+
+    def _find_location_by_name(self, name: str, headers: Dict, base_url: str) -> Optional[Dict]:
+        resp = self._request_with_retries(
+            method="GET",
+            url=f"{base_url.rstrip('/')}/api/stock/location/",
+            headers=headers,
+            params={"search": name, "limit": 10},
+            timeout=20,
+        )
+        if not resp:
+            return None
+        payload = resp.json()
+        rows = payload.get("results", payload) if isinstance(payload, dict) else payload
+        if not isinstance(rows, list):
+            return None
+        needle = name.strip().lower()
+        for loc in rows:
+            if str(loc.get("name") or "").strip().lower() == needle:
+                return loc
+        return None
+
+    def _fetch_stock_items(self, part_pk: int, headers: Dict, base_url: str) -> List[Dict]:
+        items = []
+        url = f"{base_url.rstrip('/')}/api/stock/"
+        params: Dict[str, Any] = {"part": part_pk, "limit": 250, "location_detail": True}
+        while url:
+            resp = self._request_with_retries(
+                method="GET", url=url, headers=headers, params=params, timeout=20
+            )
+            if not resp:
+                break
+            payload = resp.json()
+            rows = payload.get("results", payload) if isinstance(payload, dict) else payload
+            items.extend(rows if isinstance(rows, list) else [])
+            url = payload.get("next") if isinstance(payload, dict) else None
+            params = {}
+        return items
+
+    def _find_part_by_lookup(self, lookup_value: str) -> Optional[Dict]:
+        return _BarcodeApiHelpers.find_part_by_lookup(self, lookup_value)
+
+    def _resolve_location_string(self, part: Dict) -> str:
+        return _BarcodeApiHelpers.resolve_location_string(part)
 
     def _remove_row(self, row_id: int):
         with self._rows_lock:
-            self.scanned_rows = [r for r in self.scanned_rows if r.row_id != row_id]
+            self.pending_rows = [r for r in self.pending_rows if r.row_id != row_id]
+            self.stock_rows = [r for r in self.stock_rows if r.row_id != row_id]
+            self.location_rows = [r for r in self.location_rows if r.row_id != row_id]
         self._update_results_table()
 
     def _clear_all_rows(self, _):
         with self._rows_lock:
-            if not self.scanned_rows:
+            if not self.pending_rows and not self.stock_rows and not self.location_rows:
                 return
-            self.scanned_rows.clear()
+            self.pending_rows.clear()
+            self.stock_rows.clear()
+            self.location_rows.clear()
             self._recent_scan_codes.clear()
         self._update_results_table()
-        self._show_status_s2("Cleared all queued items", color="blue")
+        self._show_status("Cleared all queued items", color="blue")
 
-    def _update_results_table(self):
+    # ------------------------------------------------------------------ #
+    #  Table rendering                                                     #
+    # ------------------------------------------------------------------ #
+
+    def _build_table_rows(self) -> list:
         with self._rows_lock:
-            rows_snapshot = list(self.scanned_rows)
+            pending_snap = list(self.pending_rows)
+            stock_snap = list(self.stock_rows)
+            loc_snap = list(self.location_rows)
 
         table_rows = []
-        for row in rows_snapshot:
-            if row.status.startswith("Ready") or row.status.startswith("Missing location"):
-                status_color = "green" if row.status == "Ready" else "orange"
-            elif "not found" in row.status.lower() or "error" in row.status.lower():
-                status_color = "red"
-            else:
-                status_color = "blue"
 
-            part_text = f"{row.part_name} ({row.part_pk})" if row.part_pk else "-"
+        for row in pending_snap:
             table_rows.append(
                 ft.DataRow(
                     cells=[
+                        ft.DataCell(ft.Text("...", size=12, color="grey")),
+                        ft.DataCell(ft.Text(self._truncate(row.lookup_value), size=12)),
                         ft.DataCell(
                             ft.Text(
-                                self._truncate(row.display_code),
-                                size=12,
-                                no_wrap=True,
-                                overflow=ft.TextOverflow.ELLIPSIS,
+                                row.supplier.upper() if row.supplier != "unknown" else "-", size=12
                             )
                         ),
-                        ft.DataCell(
-                            ft.Text(
-                                self._truncate(row.supplier.upper()),
-                                size=12,
-                                no_wrap=True,
-                                overflow=ft.TextOverflow.ELLIPSIS,
-                            )
-                        ),
-                        ft.DataCell(
-                            ft.Text(
-                                self._truncate(row.lookup_value),
-                                size=12,
-                                no_wrap=True,
-                                overflow=ft.TextOverflow.ELLIPSIS,
-                            )
-                        ),
-                        ft.DataCell(
-                            ft.Text(
-                                self._truncate(row.status),
-                                color=status_color,
-                                size=12,
-                                no_wrap=True,
-                                overflow=ft.TextOverflow.ELLIPSIS,
-                            )
-                        ),
-                        ft.DataCell(
-                            ft.Text(
-                                self._truncate(part_text),
-                                size=12,
-                                no_wrap=True,
-                                overflow=ft.TextOverflow.ELLIPSIS,
-                            )
-                        ),
-                        ft.DataCell(
-                            ft.Text(
-                                self._truncate(row.location or "-"),
-                                size=12,
-                                no_wrap=True,
-                                overflow=ft.TextOverflow.ELLIPSIS,
-                            )
-                        ),
+                        ft.DataCell(ft.Text("-", size=12)),
+                        ft.DataCell(ft.Text("-", size=12)),
+                        ft.DataCell(ft.Text(row.status, size=12, color="blue")),
                         ft.DataCell(
                             ft.IconButton(
                                 icon=ft.icons.DELETE,
@@ -635,11 +690,64 @@ class LocationsView(BarcodeApiMixin, MainView):
                 )
             )
 
-        self.fields["results_table"].rows = table_rows
-        try:
-            self._page.update()
-        except AssertionError:
-            pass
+        for row in loc_snap:
+            table_rows.append(
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(
+                            ft.Text("Location", size=12, color="purple", weight=ft.FontWeight.BOLD)
+                        ),
+                        ft.DataCell(ft.Text(self._truncate(row.location_path), size=12)),
+                        ft.DataCell(ft.Text("-", size=12)),
+                        ft.DataCell(ft.Text("-", size=12)),
+                        ft.DataCell(ft.Text("-", size=12)),
+                        ft.DataCell(ft.Text("Ready", size=12, color="green")),
+                        ft.DataCell(
+                            ft.IconButton(
+                                icon=ft.icons.DELETE,
+                                on_click=lambda _, rid=row.row_id: self._remove_row(rid),
+                            )
+                        ),
+                    ]
+                )
+            )
+
+        for row in stock_snap:
+            table_rows.append(
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text("Stock", size=12, color="blue")),
+                        ft.DataCell(ft.Text(self._truncate(row.part_name), size=12)),
+                        ft.DataCell(
+                            ft.Text(row.supplier.upper() if row.supplier else "-", size=12)
+                        ),
+                        ft.DataCell(ft.Text(row.quantity, size=12)),
+                        ft.DataCell(ft.Text(self._truncate(row.current_location), size=12)),
+                        ft.DataCell(ft.Text(row.status, size=12, color="green")),
+                        ft.DataCell(
+                            ft.IconButton(
+                                icon=ft.icons.DELETE,
+                                on_click=lambda _, rid=row.row_id: self._remove_row(rid),
+                            )
+                        ),
+                    ]
+                )
+            )
+
+        return table_rows
+
+    def _update_results_table(self):
+        table_rows = self._build_table_rows()
+
+        def _apply():
+            if not self.page:
+                return
+            self.fields["results_table"].rows = table_rows
+            self.page.update()
+
+        page = self.page
+        if page:
+            page.run_thread(_apply)
 
     def _update_results_table_throttled(self, force: bool = False):
         now = time.monotonic()
@@ -653,7 +761,7 @@ class LocationsView(BarcodeApiMixin, MainView):
         self._update_results_table()
 
     @staticmethod
-    def _truncate(value: str, max_len: int = 30) -> str:
+    def _truncate(value: str, max_len: int = 35) -> str:
         text = str(value or "")
         return text if len(text) <= max_len else text[: max_len - 3] + "..."
 
@@ -662,12 +770,17 @@ class LocationsView(BarcodeApiMixin, MainView):
             location_value, self.stock_location_id_map
         )
 
+    # ------------------------------------------------------------------ #
+    #  Apply / Move                                                        #
+    # ------------------------------------------------------------------ #
+
     def _on_apply(self, _):
         with self._rows_lock:
-            valid_rows = [r for r in self.scanned_rows if r.part_pk]
+            valid_stock = list(self.stock_rows)
+            valid_locs = list(self.location_rows)
 
-        if not valid_rows:
-            self.show_dialog(DialogType.ERROR, "No resolved items to update")
+        if not valid_stock and not valid_locs:
+            self.show_dialog(DialogType.ERROR, "No resolved items to move")
             return
 
         location_value = str(self.fields["location_select"].value or "").strip()
@@ -697,177 +810,106 @@ class LocationsView(BarcodeApiMixin, MainView):
             "Content-Type": "application/json",
         }
 
-        total = len(valid_rows)
+        total = len(valid_stock) + len(valid_locs)
         self.fields["progress"].visible = True
         self.fields["progress"].value = 0
         self.fields["progress_message"].value = f"Processing 0/{total}"
         self.fields["progress_message"].color = "blue"
-        try:
-            self.fields["progress"].update()
-            self.fields["progress_message"].update()
-        except AssertionError:
-            pass
+        self._page.update()
 
         success = 0
         failed = 0
         failures: List[str] = []
-        successful_row_ids: List[int] = []
+        successful_stock_ids: List[int] = []
+        successful_loc_ids: List[int] = []
 
-        def _process_row(idx: int, row: ExistingPartScanRow) -> Dict[str, Any]:
-            errors: List[str] = []
-            ok = True
-
+        def _move_stock(row: StockItemRow) -> Dict[str, Any]:
             try:
-                part_pk = int(row.part_pk)
+                resp = self._request_with_retries(
+                    method="POST",
+                    url=f"{base_url.rstrip('/')}/api/stock/transfer/",
+                    headers=headers,
+                    json={
+                        "items": [{"pk": row.stock_pk, "quantity": row.quantity}],
+                        "location": location_pk,
+                        "notes": "Ki-nTree location move",
+                    },
+                    timeout=30,
+                )
+                if resp and resp.status_code in [200, 201, 202]:
+                    return {"row": row, "ok": True, "errors": [], "type": "stock"}
+                # fallback PATCH
+                resp2 = self._request_with_retries(
+                    method="PATCH",
+                    url=f"{base_url.rstrip('/')}/api/stock/{row.stock_pk}/",
+                    headers=headers,
+                    json={"location": location_pk},
+                    timeout=20,
+                )
+                ok = resp2 is not None and resp2.status_code in [200, 202]
+                return {
+                    "row": row,
+                    "ok": ok,
+                    "errors": []
+                    if ok
+                    else [f"{row.part_name} (stock {row.stock_pk}): move failed"],
+                    "type": "stock",
+                }
+            except Exception as exc:
+                return {
+                    "row": row,
+                    "ok": False,
+                    "errors": [f"{row.part_name}: {str(exc)[:60]}"],
+                    "type": "stock",
+                }
 
-                # Always set part default location
-                part_endpoint = f"{base_url.rstrip('/')}/api/part/{part_pk}/"
+        def _move_location(row: LocationScanRow) -> Dict[str, Any]:
+            try:
                 resp = self._request_with_retries(
                     method="PATCH",
-                    url=part_endpoint,
+                    url=f"{base_url.rstrip('/')}/api/stock/location/{row.location_pk}/",
                     headers=headers,
-                    json={"default_location": location_pk},
+                    json={"parent": location_pk},
                     timeout=20,
                 )
-                if resp is None or resp.status_code not in [200, 202]:
-                    ok = False
-                    errors.append(f"{row.part_name}: failed to set default location on part")
-
-                # Set location on all supplier parts of this part
-                sp_list_resp = self._request_with_retries(
-                    method="GET",
-                    url=f"{base_url.rstrip('/')}/api/company/part/",
-                    headers=headers,
-                    params={"part": part_pk, "limit": 250},
-                    timeout=20,
-                )
-                if sp_list_resp is not None:
-                    sp_payload = sp_list_resp.json()
-                    sp_rows = (
-                        sp_payload.get("results", sp_payload)
-                        if isinstance(sp_payload, dict)
-                        else sp_payload
-                    )
-                    for sp in sp_rows if isinstance(sp_rows, list) else []:
-                        sp_pk = sp.get("pk") or sp.get("id")
-                        if not sp_pk:
-                            continue
-                        sp_resp = self._request_with_retries(
-                            method="PATCH",
-                            url=f"{base_url.rstrip('/')}/api/company/part/{sp_pk}/",
-                            headers=headers,
-                            json={"default_location": location_pk},
-                            timeout=20,
-                        )
-                        if sp_resp is None or sp_resp.status_code not in [200, 202]:
-                            errors.append(
-                                f"{row.part_name}: supplier part pk={sp_pk} location update failed"
-                            )
-
-                # Transfer all stock items to new location
-                stock_items: List[Dict] = []
-                stock_url = f"{base_url.rstrip('/')}/api/stock/"
-                stock_params: Dict[str, Any] = {"part": part_pk, "limit": 250}
-                while stock_url:
-                    sr = self._request_with_retries(
-                        method="GET",
-                        url=stock_url,
-                        headers=headers,
-                        params=stock_params,
-                        timeout=20,
-                    )
-                    if sr is None:
-                        break
-                    sp2 = sr.json()
-                    s_rows = sp2.get("results", sp2) if isinstance(sp2, dict) else sp2
-                    for si in s_rows if isinstance(s_rows, list) else []:
-                        try:
-                            if (
-                                si.get("location") is not None
-                                and int(si["location"]) == location_pk
-                            ):
-                                continue
-                        except Exception:
-                            import logging
-
-                            logging.exception("Exception comparing si['location'] and location_pk:")
-                        stock_items.append(si)
-                    stock_url = sp2.get("next") if isinstance(sp2, dict) else None
-                    stock_params = {}
-
-                if stock_items:
-                    transfer_items = []
-                    for si in stock_items:
-                        try:
-                            transfer_items.append(
-                                {
-                                    "pk": int(si.get("pk") or si.get("id")),
-                                    "quantity": str(si.get("quantity") or "0"),
-                                    "batch": str(si.get("batch") or ""),
-                                    "packaging": str(si.get("packaging") or ""),
-                                    "status": int(si.get("status") or 0),
-                                }
-                            )
-                        except Exception:
-                            continue
-
-                    tr = self._request_with_retries(
-                        method="POST",
-                        url=f"{base_url.rstrip('/')}/api/stock/transfer/",
-                        headers=headers,
-                        json={
-                            "items": transfer_items,
-                            "location": location_pk,
-                            "notes": "Ki-nTree location update",
-                        },
-                        timeout=30,
-                    )
-                    if tr is None or tr.status_code not in [200, 201, 202]:
-                        # Per-item fallback
-                        for si in stock_items:
-                            si_pk = si.get("pk") or si.get("id")
-                            if not si_pk:
-                                continue
-                            fr = self._request_with_retries(
-                                method="PATCH",
-                                url=f"{base_url.rstrip('/')}/api/stock/{si_pk}/",
-                                headers=headers,
-                                json={"location": location_pk},
-                                timeout=20,
-                            )
-                            if fr is None or fr.status_code not in [200, 202]:
-                                errors.append(
-                                    f"{row.part_name}: stock item pk={si_pk} transfer failed"
-                                )
-
+                ok = resp is not None and resp.status_code in [200, 202]
+                return {
+                    "row": row,
+                    "ok": ok,
+                    "errors": [] if ok else [f"{row.location_path}: move failed"],
+                    "type": "location",
+                }
             except Exception as exc:
-                ok = False
-                errors.append(f"{row.part_name or row.lookup_value}: {str(exc)[:60]}")
-
-            return {"row": row, "ok": ok and not errors, "errors": errors}
+                return {
+                    "row": row,
+                    "ok": False,
+                    "errors": [f"{row.location_path}: {str(exc)[:60]}"],
+                    "type": "location",
+                }
 
         completed = 0
         with ThreadPoolExecutor(max_workers=min(4, max(1, total))) as executor:
-            future_map = {
-                executor.submit(_process_row, idx, row): row
-                for idx, row in enumerate(valid_rows, start=1)
-            }
-            for future in as_completed(future_map):
+            futures = {}
+            for row in valid_stock:
+                futures[executor.submit(_move_stock, row)] = row
+            for row in valid_locs:
+                futures[executor.submit(_move_location, row)] = row
+
+            for future in as_completed(futures):
                 result = future.result()
                 completed += 1
                 if result["ok"]:
                     success += 1
-                    successful_row_ids.append(result["row"].row_id)
+                    if result["type"] == "stock":
+                        successful_stock_ids.append(result["row"].row_id)
+                    else:
+                        successful_loc_ids.append(result["row"].row_id)
                 else:
                     failed += 1
                     failures.extend(result["errors"])
                 self.fields["progress"].value = completed / total if total else 1.0
                 self.fields["progress_message"].value = f"Processing {completed}/{total}"
-                try:
-                    self.fields["progress"].update()
-                    self.fields["progress_message"].update()
-                except AssertionError:
-                    pass
+                self._page.update()
 
         self.fields["progress"].value = 1.0
         self.fields["progress"].color = (
@@ -875,11 +917,7 @@ class LocationsView(BarcodeApiMixin, MainView):
         )
         self.fields["progress_message"].value = f"Done: {success} success, {failed} failed"
         self.fields["progress_message"].color = "green" if failed == 0 else "orange"
-        try:
-            self.fields["progress"].update()
-            self.fields["progress_message"].update()
-        except AssertionError:
-            pass
+        self._page.update()
 
         if failures:
             detail = "\n".join(f"- {e}" for e in failures[:5])
@@ -887,16 +925,21 @@ class LocationsView(BarcodeApiMixin, MainView):
                 detail += f"\n- ... and {len(failures) - 5} more"
             self.show_dialog(DialogType.WARNING, f"Finished with issues:\n{detail}")
         else:
-            self.show_dialog(DialogType.VALID, f"Updated {success} item(s) successfully")
+            self.show_dialog(DialogType.VALID, f"Moved {success} item(s) successfully")
 
-        if successful_row_ids:
+        if successful_stock_ids or successful_loc_ids:
             with self._rows_lock:
-                self.scanned_rows = [
-                    r for r in self.scanned_rows if r.row_id not in successful_row_ids
+                self.stock_rows = [
+                    r for r in self.stock_rows if r.row_id not in successful_stock_ids
+                ]
+                self.location_rows = [
+                    r for r in self.location_rows if r.row_id not in successful_loc_ids
                 ]
             self._update_results_table()
+            if successful_loc_ids:
+                threading.Thread(target=self._load_locations, args=(True,), daemon=True).start()
 
-        self._show_status_s2(
+        self._show_status(
             f"Done: {success} success, {failed} failed",
             color="green" if failed == 0 else "orange",
         )

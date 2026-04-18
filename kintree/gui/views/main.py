@@ -1112,15 +1112,19 @@ class InventreeView(MainView):
             return []
 
     def get_category_options(self, reload=False):
+        if reload:
+            inventree_interface.reload_category_cache()
         return [
             ft.dropdown.Option(category)
-            for category in inventree_interface.build_category_tree(reload=reload)
+            for category in inventree_interface.get_cached_category_tree()
         ]
 
     def get_stock_location_options(self, reload=False):
+        if reload:
+            inventree_interface.reload_location_cache()
         return [
             ft.dropdown.Option(location)
-            for location in inventree_interface.build_stock_location_tree(reload=reload)
+            for location in inventree_interface.get_cached_location_tree()
         ]
 
     def reload_categories(self, e):
@@ -1684,7 +1688,7 @@ class CreateView(MainView):
             return int(self._stock_location_pk_cache[normalized_location])
 
         if not self._stock_location_id_map:
-            self._stock_location_id_map = inventree_interface.get_stock_location_id_map() or {}
+            self._stock_location_id_map = inventree_interface.get_cached_location_id_map()
 
         location_pk = inventree_interface.resolve_stock_location_pk(
             normalized_location,
@@ -2020,7 +2024,7 @@ class CreateView(MainView):
             self.show_dialog(DialogType.ERROR, "ERROR: Failed to connect to InvenTree server")
             return
 
-        self._stock_location_id_map = inventree_interface.get_stock_location_id_map() or {}
+        self._stock_location_id_map = inventree_interface.get_cached_location_id_map()
         self._stock_location_pk_cache = {}
 
         self.reset_progress_bars()
@@ -2440,7 +2444,7 @@ class CreateView(MainView):
 
             if not self._stock_location_id_map:
                 ts_map_prefetch = time.perf_counter()
-                self._stock_location_id_map = inventree_interface.get_stock_location_id_map() or {}
+                self._stock_location_id_map = inventree_interface.get_cached_location_id_map()
                 elapsed_map_prefetch = (time.perf_counter() - ts_map_prefetch) * 1000.0
                 cprint(
                     f"[MAIN]\tCreate stock location map prefetch: {len(self._stock_location_id_map)} entries ({elapsed_map_prefetch:.1f} ms)",

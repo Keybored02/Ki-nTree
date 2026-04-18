@@ -938,12 +938,11 @@ class GuidedPickupModal:
                 rows.append(ft.DataRow(cells=[loc_cell, name_cell, qty_cell, done_cell]))
 
         self._location_table.rows = rows
-        try:
-            self._location_table.update()
-        except Exception:
-            import logging
-
-            logging.exception("Exception updating location_table:")
+        if self._location_table.page:
+            try:
+                self._location_table.update()
+            except AssertionError:
+                pass
 
     def _rebuild_location_list_table(self):
         """Rebuild page-1b table: destination locations for the current part (IN mode)."""
@@ -1117,12 +1116,11 @@ class GuidedPickupModal:
         total = len(self._items)
         self._counter_text.value = f"{done} / {total}"
         self._counter_text.color = "green" if done == total else "grey"
-        try:
-            self._counter_text.update()
-        except Exception:
-            import logging
-
-            logging.exception("Exception updating counter_text:")
+        if self._counter_text.page:
+            try:
+                self._counter_text.update()
+            except AssertionError:
+                pass
 
     def _set_status(self, msg: str, color: str = "grey"):
         self._status_text.value = msg

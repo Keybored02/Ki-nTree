@@ -279,6 +279,7 @@ class DropdownWithSearch(ft.UserControl):
         self._options = options
         self._on_submit = on_submit
         self._on_search_open = on_search_open
+        self._search_open = False
         self.dropdown = ft.Dropdown(
             label=label,
             width=dr_width,
@@ -286,7 +287,7 @@ class DropdownWithSearch(ft.UserControl):
             options=options,
             on_change=on_change,
         )
-        self.search_button = ft.IconButton("search", on_click=self.search_now)
+        self.search_button = ft.IconButton("search", on_click=self._toggle_search)
         self.search_field = ft.TextField(
             border="none",
             width=sr_width,
@@ -319,7 +320,6 @@ class DropdownWithSearch(ft.UserControl):
         self.dropdown.value = value
         if value is None:
             self.search_field.value = None
-            self.done_search()
 
     @property
     def disabled(self):
@@ -346,7 +346,14 @@ class DropdownWithSearch(ft.UserControl):
     @options.setter
     def options(self, options):
         self._options = options
+        prev = self.dropdown.value
         self.dropdown.options = self._options
+        if prev is not None and any(getattr(o, "key", None) == prev for o in (options or [])):
+            # Restore valid previous value (Flet clears it when options are replaced)
+            self.dropdown.value = prev
+        else:
+            # Explicitly clear invalid value so Flutter doesn't get value-without-matching-option
+            self.dropdown.value = None
 
     @property
     def on_change(self):
@@ -376,19 +383,23 @@ class DropdownWithSearch(ft.UserControl):
             self.dropdown.options = filtered_options
             if len(filtered_options) == 1:
                 self.dropdown.value = self.dropdown.options[0].key
-                if self.on_change:
-                    self.on_change(e, label=self.label, value=self.value)
             elif len(filtered_options) == 0:
                 self.dropdown.value = self.search_field.value
-                if self.on_change:
-                    self.on_change(e, label=self.label, value=self.value)
             else:
                 self.dropdown.value = None
         else:
             self.dropdown.options = self._options
         self._safe_update(self.dropdown)
         if self.on_change:
-            self.on_change()
+            self.on_change(e, label=self.label, value=self.value)
+
+    def _on_search_blur(self, e):
+        """Close the search box when the field loses focus.
+        Uses page.run_thread so the update doesn't race with nav events."""
+        page = self.page
+        if page is None:
+            return
+        page.run_thread(self.done_search)
 
     def _on_search_submit(self, e):
         """Called when Enter is pressed in the search field (e.g. scanner sends Enter).
@@ -397,30 +408,59 @@ class DropdownWithSearch(ft.UserControl):
         if self._on_submit:
             self._on_submit(e)
 
+    def _toggle_search(self, e):
+        if self._search_open:
+            self.done_search(e)
+        else:
+            self.search_now(e)
+
     def search_now(self, e):
+        if self._search_open:
+            return
+        self._search_open = True
         if self._on_search_open:
             self._on_search_open()
         self.search_box.width = self.search_width
-        self._safe_update(self.search_box)
         self.search_button.icon = "highlight_remove"
-        self.search_button.on_click = self.done_search
-        self._safe_update(self.search_button)
         self.search_field.border = "outline"
+        self._safe_update(self.search_box)
+        self._safe_update(self.search_button)
         self._safe_update(self.search_field)
         self.search_field.focus()
         if self.search_field.value:
             self.on_search(e)
 
     def done_search(self, e=None):
+        self._search_open = False
         self.search_box.width = 0
-        self._safe_update(self.search_box)
         self.search_button.icon = "search"
-        self.search_button.on_click = self.search_now
-        self._safe_update(self.search_button)
         self.search_field.border = "none"
+        self.search_field.value = None
         self._safe_update(self.search_field)
-        self.options = self._options
+        self._safe_update(self.search_button)
+        self._safe_update(self.search_box)
+        # Restore options separately after UI is collapsed
+        self.dropdown.options = self._options
         self._safe_update(self.dropdown)
+
+    def reset_search_state(self):
+        """Reset search UI state without triggering any control.update() calls.
+        Use this from background threads — let the caller flush with page.update()."""
+        self._search_open = False
+        self.search_box.width = 0
+        self.search_button.icon = "search"
+        self.search_field.border = "none"
+        self.search_field.value = None
+        self.options = self._options
+
+    def set_enabled(self, enabled: bool = True):
+        """Enable/disable all child controls without calling control.update().
+        Use this from background threads — let the caller flush with page.update()."""
+        disabled = not enabled
+        self.dropdown.disabled = disabled
+        self.search_button.disabled = disabled
+        self.search_field.disabled = disabled
+        self.search_box.disabled = disabled
 
 
 class MenuButton(ft.Container):

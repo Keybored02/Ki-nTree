@@ -21,20 +21,11 @@ from .views.settings import UserSettingsView
 
 
 def _stabilize_layout(page: ft.Page):
-    """Force a full layout refresh to avoid intermittent compressed rendering."""
+    """Trigger a full page refresh. Safe from any thread."""
     try:
-        for view in page.views:
-            try:
-                view.update()
-            except Exception:
-                import logging
-
-                logging.exception("Exception updating view in _stabilize_layout:")
         page.update()
     except Exception:
-        import logging
-
-        logging.exception("Exception updating page in _stabilize_layout:")
+        pass
 
 
 def init_gui(page: ft.Page):
@@ -153,7 +144,6 @@ def kintree_gui(page: ft.Page):
             else:
                 page.views.append(get_settings_view("user"))
         page.update()
-        _stabilize_layout(page)
         if "/main/barcode" in current_route:
             main_views["barcode"].focus_barcode_input()
         if "/main/locations" in current_route:

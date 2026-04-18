@@ -1,6 +1,7 @@
 import copy
 import re
 import time
+import threading as _threading
 
 from ..common import part_tools
 from ..common import progress
@@ -18,6 +19,83 @@ from ..search import search_api
 from ..search import tme_api
 
 category_separator = "/"
+
+# ---------------------------------------------------------------------------
+# App-wide in-memory cache for location and category data.
+# All GUI views read from these instead of reloading independently.
+# Use invalidate_location_cache() / invalidate_category_cache() to force
+# a fresh fetch on the next access.
+# ---------------------------------------------------------------------------
+
+_cache_lock = _threading.Lock()
+
+_location_tree: list = []  # ordered display strings for dropdowns
+_location_id_map: dict = {}  # path → pk
+_location_cache_valid = False
+
+_category_tree: list = []  # ordered display strings for dropdowns
+_category_cache_valid = False
+
+
+def invalidate_location_cache() -> None:
+    global _location_cache_valid
+    with _cache_lock:
+        _location_cache_valid = False
+
+
+def invalidate_category_cache() -> None:
+    global _category_cache_valid
+    with _cache_lock:
+        _category_cache_valid = False
+
+
+def get_cached_location_tree() -> list:
+    """Return the shared location tree, loading from disk if not yet cached."""
+    global _location_tree, _location_id_map, _location_cache_valid
+    with _cache_lock:
+        if not _location_cache_valid:
+            _location_tree = list(build_stock_location_tree(reload=False))
+            _location_id_map = dict(inventree_api.get_stock_location_id_map() or {})
+            _location_cache_valid = True
+        return list(_location_tree)
+
+
+def get_cached_location_id_map() -> dict:
+    """Return the shared path→pk map, loading from disk if not yet cached."""
+    global _location_tree, _location_id_map, _location_cache_valid
+    with _cache_lock:
+        if not _location_cache_valid:
+            _location_tree = list(build_stock_location_tree(reload=False))
+            _location_id_map = dict(inventree_api.get_stock_location_id_map() or {})
+            _location_cache_valid = True
+        return dict(_location_id_map)
+
+
+def reload_location_cache() -> None:
+    """Force a fresh fetch from the server and update the shared cache."""
+    global _location_tree, _location_id_map, _location_cache_valid
+    with _cache_lock:
+        _location_tree = list(build_stock_location_tree(reload=True))
+        _location_id_map = dict(inventree_api.get_stock_location_id_map() or {})
+        _location_cache_valid = True
+
+
+def get_cached_category_tree() -> list:
+    """Return the shared category tree, loading from disk if not yet cached."""
+    global _category_tree, _category_cache_valid
+    with _cache_lock:
+        if not _category_cache_valid:
+            _category_tree = list(build_category_tree(reload=False))
+            _category_cache_valid = True
+        return list(_category_tree)
+
+
+def reload_category_cache() -> None:
+    """Force a fresh fetch from the server and update the shared category cache."""
+    global _category_tree, _category_cache_valid
+    with _cache_lock:
+        _category_tree = list(build_category_tree(reload=True))
+        _category_cache_valid = True
 
 
 def connect_to_server(timeout=5, force_reconnect=False) -> bool:

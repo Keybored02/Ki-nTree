@@ -1630,108 +1630,104 @@ class BarcodeImportView(MainView):
         # widgets (text fields, dropdowns, buttons) are unaffected.
         self.column = ft.Column(
             controls=[
-                ft.GestureDetector(
-                    on_tap=self.focus_barcode_input,
-                    expand=True,
-                    content=ft.Container(
-                        content=ft.Column(
-                            controls=[
-                                ft.Row(
-                                    [
-                                        ft.Text(
-                                            "Barcode Import",
-                                            style=ft.TextThemeStyle.HEADLINE_MEDIUM,
-                                        )
-                                    ]
-                                ),
-                                ft.Divider(),
-                                # Input section
-                                ft.Text(
-                                    "1. Scan or Paste Barcodes:",
-                                    style=ft.TextThemeStyle.BODY_LARGE,
-                                ),
-                                self.fields["barcode_input"],
-                                ft.Row(
-                                    [
-                                        self.fields["barcode_parse"],
-                                        self.fields["barcode_clear"],
-                                        self.fields["clear_all_rows"],
-                                    ]
-                                ),
-                                ft.Divider(),
-                                # Results section
-                                ft.Text(
-                                    "2. Review Scanned Items:",
-                                    style=ft.TextThemeStyle.BODY_LARGE,
-                                ),
-                                ft.Container(
-                                    content=self.fields["results_table"],
-                                    expand=True,
-                                ),
-                                ft.Divider(),
-                                # Settings section
-                                ft.Text(
-                                    "3. Configure Import:",
-                                    style=ft.TextThemeStyle.BODY_LARGE,
-                                ),
-                                ft.Column(
-                                    controls=[
-                                        ft.Row(
-                                            [
-                                                self.fields["category_select"],
-                                                self.fields["reload_categories"],
-                                                self.fields["clear_category"],
-                                            ]
-                                        ),
-                                        ft.Row(
-                                            [
-                                                self.fields["location_select"],
-                                                self.fields["reload_locations"],
-                                                self.fields["clear_location"],
-                                            ]
-                                        ),
-                                    ],
-                                    spacing=8,
-                                ),
-                                self.fields["create_stock_check"],
-                                ft.Text(
-                                    "Barcode & Existing Part Options:",
-                                    style=ft.TextThemeStyle.BODY_MEDIUM,
-                                ),
-                                self.fields["use_manufacturer_barcode_check"],
-                                self.fields["force_barcode_reassign_check"],
-                                self.fields["update_existing_metadata_check"],
-                                ft.Text(
-                                    "Stock Item Location:",
-                                    style=ft.TextThemeStyle.BODY_MEDIUM,
-                                ),
-                                self.fields["assign_all_stock_items_location_check"],
-                                ft.Text(
-                                    "Purchase Order Flow:",
-                                    style=ft.TextThemeStyle.BODY_MEDIUM,
-                                ),
-                                self.fields["po_flow_check"],
-                                ft.Divider(),
-                                # Action buttons
-                                ft.Row(
-                                    [
-                                        self.fields["barcode_submit"],
-                                        ft.ElevatedButton(
-                                            text="Back",
-                                            on_click=lambda _: self._page.go("/main/create"),
-                                        ),
-                                    ]
-                                ),
-                                self.fields["import_progress"],
-                                self.fields["import_progress_message"],
-                                self.fields["status_message"],
-                            ],
-                            scroll=ft.ScrollMode.AUTO,
-                            spacing=10,
-                        ),
-                        padding=20,
-                        expand=True,
+                ft.Container(
+                    content=ft.Column(
+                        controls=[
+                            ft.Row(
+                                [
+                                    ft.Text(
+                                        "Barcode Import",
+                                        style=ft.TextThemeStyle.HEADLINE_MEDIUM,
+                                    )
+                                ]
+                            ),
+                            ft.Divider(),
+                            # Input section
+                            ft.Text(
+                                "1. Scan or Paste Barcodes:",
+                                style=ft.TextThemeStyle.BODY_LARGE,
+                            ),
+                            self.fields["barcode_input"],
+                            ft.Row(
+                                [
+                                    self.fields["barcode_parse"],
+                                    self.fields["barcode_clear"],
+                                    self.fields["clear_all_rows"],
+                                ]
+                            ),
+                            ft.Divider(),
+                            # Results section
+                            ft.Text(
+                                "2. Review Scanned Items:",
+                                style=ft.TextThemeStyle.BODY_LARGE,
+                            ),
+                            ft.Container(
+                                content=self.fields["results_table"],
+                                expand=True,
+                            ),
+                            ft.Divider(),
+                            # Settings section
+                            ft.Text(
+                                "3. Configure Import:",
+                                style=ft.TextThemeStyle.BODY_LARGE,
+                            ),
+                            ft.Column(
+                                controls=[
+                                    ft.Row(
+                                        [
+                                            self.fields["category_select"],
+                                            self.fields["reload_categories"],
+                                            self.fields["clear_category"],
+                                        ]
+                                    ),
+                                    ft.Row(
+                                        [
+                                            self.fields["location_select"],
+                                            self.fields["reload_locations"],
+                                            self.fields["clear_location"],
+                                        ]
+                                    ),
+                                ],
+                                spacing=8,
+                            ),
+                            self.fields["create_stock_check"],
+                            ft.Text(
+                                "Barcode & Existing Part Options:",
+                                style=ft.TextThemeStyle.BODY_MEDIUM,
+                            ),
+                            self.fields["use_manufacturer_barcode_check"],
+                            self.fields["force_barcode_reassign_check"],
+                            self.fields["update_existing_metadata_check"],
+                            ft.Text(
+                                "Stock Item Location:",
+                                style=ft.TextThemeStyle.BODY_MEDIUM,
+                            ),
+                            self.fields["assign_all_stock_items_location_check"],
+                            ft.Text(
+                                "Purchase Order Flow:",
+                                style=ft.TextThemeStyle.BODY_MEDIUM,
+                            ),
+                            self.fields["po_flow_check"],
+                            ft.Divider(),
+                            # Action buttons
+                            ft.Row(
+                                [
+                                    self.fields["barcode_submit"],
+                                    ft.ElevatedButton(
+                                        text="Back",
+                                        on_click=lambda _: self._page.go("/main/create"),
+                                    ),
+                                ]
+                            ),
+                            self.fields["import_progress"],
+                            self.fields["import_progress_message"],
+                            self.fields["status_message"],
+                        ],
+                        scroll=ft.ScrollMode.AUTO,
+                        spacing=10,
                     ),
+                    padding=20,
+                    expand=True,
                 ),
             ],
             expand=True,
@@ -1757,9 +1753,9 @@ class BarcodeImportView(MainView):
         """Load available categories and stock locations."""
         try:
             ts_load = time.perf_counter()
-            category_list = inventree_interface.build_category_tree(reload=False)
+            category_list = inventree_interface.get_cached_category_tree()
 
-            location_list = inventree_interface.build_stock_location_tree(reload=False)
+            location_list = inventree_interface.get_cached_location_tree()
 
             # Keep full path->pk map lazy to avoid expensive startup fetches.
             self.stock_location_id_map = {}
@@ -1800,7 +1796,8 @@ class BarcodeImportView(MainView):
                 self.show_dialog(DialogType.ERROR, "ERROR: Failed to connect to InvenTree server")
                 return
 
-            category_list = inventree_interface.build_category_tree(reload=True)
+            inventree_interface.reload_category_cache()
+            category_list = inventree_interface.get_cached_category_tree()
             self.fields["category_select"].options = [
                 ft.dropdown.Option(category) for category in category_list
             ]
@@ -1817,8 +1814,8 @@ class BarcodeImportView(MainView):
                 return
 
             ts_reload = time.perf_counter()
-            location_list = inventree_interface.build_stock_location_tree(reload=True)
-            # Drop stale map after reload; it will be rebuilt lazily on first lookup.
+            inventree_interface.reload_location_cache()
+            location_list = inventree_interface.get_cached_location_tree()
             self.stock_location_id_map = {}
             self.fields["location_select"].options = [
                 ft.dropdown.Option(location) for location in location_list
@@ -3590,7 +3587,7 @@ class BarcodeImportView(MainView):
                         with location_map_lock:
                             if not location_map_loaded:
                                 location_map.update(
-                                    inventree_interface.get_stock_location_id_map() or {}
+                                    inventree_interface.get_cached_location_id_map() or {}
                                 )
                                 location_map_loaded = True
 
@@ -4537,7 +4534,9 @@ class BarcodeAssignmentView(MainView):
                 self._location_path_to_pk_cache.clear()
                 self._location_pk_to_path_cache.clear()
 
-            location_list = inventree_interface.build_stock_location_tree(reload=reload)
+            if reload:
+                inventree_interface.reload_location_cache()
+            location_list = inventree_interface.get_cached_location_tree()
             self.fields["location_select"].options = [
                 ft.dropdown.Option(location) for location in location_list
             ]
