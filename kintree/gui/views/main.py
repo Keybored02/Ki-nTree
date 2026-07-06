@@ -73,6 +73,7 @@ def _build_navigation():
             "Barcode": {"nav_index": 1, "route": "/main/barcode"},
             "Locations": {"nav_index": 2, "route": "/main/locations"},
             "Pickup": {"nav_index": 3, "route": "/main/pickup"},
+            "Verification": {"nav_index": 4, "route": "/main/verification"},
         }
         destinations = [
             ft.NavigationRailDestination(
@@ -99,6 +100,12 @@ def _build_navigation():
                 label_content=ft.Text("Pickup", size=16),
                 padding=10,
             ),
+            ft.NavigationRailDestination(
+                icon_content=ft.Icon(name=ft.icons.FACT_CHECK_OUTLINED, size=40),
+                selected_icon_content=ft.Icon(name=ft.icons.FACT_CHECK, size=40),
+                label_content=ft.Text("Verification", size=16),
+                padding=10,
+            ),
         ]
     else:
         nav = {
@@ -109,6 +116,7 @@ def _build_navigation():
             "Barcode": {"nav_index": 4, "route": "/main/barcode"},
             "Locations": {"nav_index": 5, "route": "/main/locations"},
             "Pickup": {"nav_index": 6, "route": "/main/pickup"},
+            "Verification": {"nav_index": 7, "route": "/main/verification"},
         }
         destinations = [
             ft.NavigationRailDestination(
@@ -151,6 +159,12 @@ def _build_navigation():
                 icon_content=ft.Icon(name=ft.icons.SHOPPING_BASKET_OUTLINED, size=40),
                 selected_icon_content=ft.Icon(name=ft.icons.SHOPPING_BASKET, size=40),
                 label_content=ft.Text("Pickup", size=16),
+                padding=10,
+            ),
+            ft.NavigationRailDestination(
+                icon_content=ft.Icon(name=ft.icons.FACT_CHECK_OUTLINED, size=40),
+                selected_icon_content=ft.Icon(name=ft.icons.FACT_CHECK, size=40),
+                label_content=ft.Text("Verification", size=16),
                 padding=10,
             ),
         ]

@@ -14,6 +14,7 @@ from .views.main import InventreeView
 from .views.main import KicadView
 from .views.main import PartSearchView
 from .views.pickup import PickupView
+from .views.verification import VerificationView
 from .views.settings import InvenTreeSettingsView
 from .views.settings import KiCadSettingsView
 from .views.settings import SupplierSettingsView
@@ -71,6 +72,7 @@ def kintree_gui(page: ft.Page):
         "barcode": None,
         "locations": None,
         "pickup": None,
+        "verification": None,
     }
     settings_views = {
         "user": None,
@@ -94,6 +96,8 @@ def kintree_gui(page: ft.Page):
             main_views["locations"] = LocationsView(page)
         elif key == "pickup" and main_views["pickup"] is None:
             main_views["pickup"] = PickupView(page)
+        elif key == "verification" and main_views["verification"] is None:
+            main_views["verification"] = VerificationView(page)
         return main_views[key]
 
     def get_settings_view(key: str):
@@ -130,6 +134,8 @@ def kintree_gui(page: ft.Page):
                 page.views.append(get_main_view("locations"))
             elif "pickup" in current_route:
                 page.views.append(get_main_view("pickup"))
+            elif "verification" in current_route:
+                page.views.append(get_main_view("verification"))
         elif "/settings" in current_route:
             if page.views and "/settings" in page.views[-1].route:
                 page.views.pop()
@@ -148,6 +154,8 @@ def kintree_gui(page: ft.Page):
             main_views["barcode"].focus_barcode_input()
         if "/main/locations" in current_route:
             main_views["locations"].focus_input()
+        if "/main/verification" in current_route:
+            main_views["verification"].focus_input()
 
     def view_pop(view):
         """Pop setting view"""
