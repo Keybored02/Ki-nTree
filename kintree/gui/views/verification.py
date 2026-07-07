@@ -22,12 +22,23 @@ from .main import MainView
 
 
 # ---------------------------------------------------------------------------
+# Scan result states (for the feedback indicator)
+# ---------------------------------------------------------------------------
+
+_SCAN_IDLE = "idle"
+_SCAN_CHECKING = "checking"
+_SCAN_VERIFIED = "verified"
+_SCAN_UNEXPECTED = "unexpected"
+_SCAN_DUPLICATE = "duplicate"  # scanned an already-fully-verified part
+
+
+# ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
 
 
 class VerifyItem:
-    """One expected item in the selected location."""
+    """One expected stock item row in the selected location."""
 
     STATUS_EXPECTED = "expected"
     STATUS_VERIFIED = "verified"
@@ -48,6 +59,8 @@ class VerifyItem:
         self.location = location
         self.status = self.STATUS_EXPECTED
         self.manual = False
+        # Populated for unexpected items: where InvenTree says this part lives
+        self.expected_locations: List[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +101,11 @@ class VerificationView(BarcodeApiMixin, MainView):
         self._table_last_update_ts = 0.0
         self._table_min_update_interval_s = 0.15
 
+        # Scan feedback indicator state
+        self._scan_state = _SCAN_IDLE
+        self._scan_state_lock = threading.Lock()
+        self._scan_seq = 0  # incremented on every new scan; guards stale CHECKING updates
+
         super().__init__(page=page)
         self.build_page()
 
@@ -104,7 +122,30 @@ class VerificationView(BarcodeApiMixin, MainView):
             on_submit=self._on_input_submit,
             on_change=self._on_input_changed,
             hint_text="Start by scanning or typing a location. Then scan item barcodes.",
+            expand=True,
         )
+
+        # Scan feedback indicator: ProgressRing (spinner) while checking,
+        # Icon when done. Wrapped in a fixed-size container so layout is stable.
+        self._scan_ring = ft.ProgressRing(
+            width=36,
+            height=36,
+            stroke_width=3,
+            color="blue",
+            visible=False,
+        )
+        self._scan_icon = ft.Icon(
+            name=ft.icons.RADIO_BUTTON_UNCHECKED,
+            size=36,
+            color="grey",
+            visible=True,
+        )
+        self._scan_indicator = ft.Stack(
+            controls=[self._scan_ring, self._scan_icon],
+            width=40,
+            height=40,
+        )
+
         self.fields["parse_btn"] = ft.ElevatedButton(
             text="Parse",
             on_click=self._on_parse,
@@ -173,7 +214,20 @@ class VerificationView(BarcodeApiMixin, MainView):
                                 ],
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             ),
-                            self.fields["scan_input"],
+                            # Input row: text field + persistent scan indicator
+                            ft.Row(
+                                controls=[
+                                    self.fields["scan_input"],
+                                    ft.Container(
+                                        content=self._scan_indicator,
+                                        alignment=ft.alignment.center,
+                                        width=56,
+                                        height=56,
+                                    ),
+                                ],
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                spacing=8,
+                            ),
                             ft.Row(
                                 controls=[
                                     self.fields["parse_btn"],
@@ -182,8 +236,8 @@ class VerificationView(BarcodeApiMixin, MainView):
                                     self.fields["reload_locations"],
                                 ]
                             ),
-                            ft.Container(content=self._items_table),
                             self.fields["status"],
+                            ft.Container(content=self._items_table),
                         ],
                         scroll=ft.ScrollMode.AUTO,
                         spacing=10,
@@ -207,10 +261,58 @@ class VerificationView(BarcodeApiMixin, MainView):
         return super().did_mount()
 
     def nav_rail_redirect(self, e):
-        field = self.fields.get("location_select")
-        if field:
-            field.reset_search_state()
         super().nav_rail_redirect(e)
+
+    # ------------------------------------------------------------------ #
+    #  Scan feedback indicator                                             #
+    # ------------------------------------------------------------------ #
+
+    def _set_scan_state(self, state: str, seq: int = -1):
+        """Update the scan indicator directly from the calling (worker) thread.
+
+        For _SCAN_CHECKING: skip if a newer scan has already started (seq !=
+        self._scan_seq means this CHECKING is stale).
+        For final states: always apply — they are always the last thing a
+        scan thread does, so they can never be stale relative to themselves.
+        """
+        with self._scan_state_lock:
+            if state == _SCAN_CHECKING and seq != -1 and seq != self._scan_seq:
+                return
+            self._scan_state = state
+
+        page = self.page
+        if not page:
+            return
+
+        if state == _SCAN_CHECKING:
+            self._scan_ring.visible = True
+            self._scan_icon.visible = False
+        elif state == _SCAN_VERIFIED:
+            self._scan_ring.visible = False
+            self._scan_icon.name = ft.icons.CHECK_CIRCLE
+            self._scan_icon.color = "green"
+            self._scan_icon.visible = True
+        elif state == _SCAN_UNEXPECTED:
+            self._scan_ring.visible = False
+            self._scan_icon.name = ft.icons.CANCEL
+            self._scan_icon.color = "red"
+            self._scan_icon.visible = True
+        elif state == _SCAN_DUPLICATE:
+            self._scan_ring.visible = False
+            self._scan_icon.name = ft.icons.WARNING_AMBER_ROUNDED
+            self._scan_icon.color = "amber"
+            self._scan_icon.visible = True
+        else:  # idle
+            self._scan_ring.visible = False
+            self._scan_icon.name = ft.icons.RADIO_BUTTON_UNCHECKED
+            self._scan_icon.color = "grey"
+            self._scan_icon.visible = True
+
+        try:
+            self._scan_ring.update()
+            self._scan_icon.update()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     #  Location loading                                                    #
@@ -300,6 +402,7 @@ class VerificationView(BarcodeApiMixin, MainView):
         self._phase_text.color = "blue"
         self._location_text.value = ""
         self._counter_text.value = ""
+        self._set_scan_state(_SCAN_IDLE)
         self._update_table()
         self._show_status("Reset.", color="grey")
         try:
@@ -354,10 +457,14 @@ class VerificationView(BarcodeApiMixin, MainView):
         if self._phase == self._PHASE_LOCATION:
             threading.Thread(target=self._resolve_location, args=(code,), daemon=True).start()
         else:
-            threading.Thread(target=self._resolve_item_scan, args=(code,), daemon=True).start()
+            with self._scan_state_lock:
+                self._scan_seq += 1
+                seq = self._scan_seq
+            self._set_scan_state(_SCAN_CHECKING, seq=seq)
+            threading.Thread(target=self._resolve_item_scan, args=(code, seq), daemon=True).start()
 
     # ------------------------------------------------------------------ #
-    #  Phase 1: resolve location                                          #
+    #  Phase 1: resolve location                                           #
     # ------------------------------------------------------------------ #
 
     def _resolve_location(self, raw: str):
@@ -430,13 +537,11 @@ class VerificationView(BarcodeApiMixin, MainView):
             self._show_status("Invalid location response.", color="red")
             return
 
-        # Load all stock items for this location (and sub-locations if any)
         self._show_status(f"Loading items for: {loc_path}...", color="blue")
         items = self._fetch_location_stock(loc_pk, headers, base_url, sublocations > 0)
 
         if not items:
             self._show_status(f"No stock items found at: {loc_path}", color="orange")
-            # Still enter verification phase so unexpected scans can be detected
         else:
             self._show_status(f"Loaded {len(items)} item(s). Scan to verify.", color="green")
 
@@ -446,7 +551,6 @@ class VerificationView(BarcodeApiMixin, MainView):
         with self._items_lock:
             self._items = items
 
-        # Switch phase
         self._phase = self._PHASE_ITEMS
         self._phase_text.value = "Phase: Verify Items"
         self._phase_text.color = "green"
@@ -546,12 +650,32 @@ class VerificationView(BarcodeApiMixin, MainView):
         return items
 
     # ------------------------------------------------------------------ #
-    #  Phase 2: verify item scans                                         #
+    #  Phase 2: verify item scans                                          #
     # ------------------------------------------------------------------ #
 
-    def _resolve_item_scan(self, raw: str):
+    def _resolve_item_scan(self, raw: str, seq: int = -1):
+        # Step 0 — parse barcode locally first (no API call)
+        parsed = self.parser.parse(raw)
+        supplier = parsed.get("supplier", "unknown")
+        mpn = str(parsed.get("manufacturer_pn") or "").strip()
+        spn = str(parsed.get("supplier_pn") or "").strip()
+        barcode_val = str(parsed.get("barcode") or "").strip()
+        lookup_value = barcode_val or mpn or spn or raw
+
+        # Fast local match: if the parsed value matches an expected item's
+        # name/IPN directly we can verify without any API call.
+        fast_name = self._fast_match_mutate(lookup_value, mpn, spn, raw)
+        if fast_name is not None:
+            self._show_status(f"✓ Verified: {fast_name}", color="green")
+            self._set_scan_state(_SCAN_VERIFIED, seq=seq)
+            self._update_table_throttled(force=True)
+            self._update_counter()
+            return
+
+        # No fast match — go to server
         if not self._connect_server_with_retries():
             self._show_status("Server offline.", color="red")
+            self._set_scan_state(_SCAN_UNEXPECTED, seq=seq)
             return
 
         api_obj = getattr(inventree_interface.inventree_api, "inventree_api", None)
@@ -559,6 +683,7 @@ class VerificationView(BarcodeApiMixin, MainView):
         base_url = getattr(api_obj, "base_url", "") if api_obj else ""
         if not token or not base_url:
             self._show_status("No InvenTree auth.", color="red")
+            self._set_scan_state(_SCAN_UNEXPECTED, seq=seq)
             return
 
         headers = {
@@ -566,13 +691,6 @@ class VerificationView(BarcodeApiMixin, MainView):
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
-
-        parsed = self.parser.parse(raw)
-        supplier = parsed.get("supplier", "unknown")
-        mpn = str(parsed.get("manufacturer_pn") or "").strip()
-        spn = str(parsed.get("supplier_pn") or "").strip()
-        barcode_val = str(parsed.get("barcode") or "").strip()
-        lookup_value = barcode_val or mpn or spn or raw
 
         part_pk = 0
         part_name = ""
@@ -590,7 +708,6 @@ class VerificationView(BarcodeApiMixin, MainView):
             if resp:
                 result = resp.json()
                 if isinstance(result, dict):
-                    # Barcode linked directly to a part
                     part_ref = result.get("part")
                     if isinstance(part_ref, dict):
                         part_pk = int(part_ref.get("pk") or part_ref.get("id") or 0)
@@ -598,7 +715,6 @@ class VerificationView(BarcodeApiMixin, MainView):
                     elif part_ref:
                         part_pk = int(part_ref)
 
-                    # Barcode linked to a stock item → fetch the part
                     if not part_pk:
                         si_ref = result.get("stockitem")
                         if isinstance(si_ref, dict):
@@ -611,29 +727,16 @@ class VerificationView(BarcodeApiMixin, MainView):
         except Exception:
             pass
 
-        # If we got a pk but no name, fetch the part detail
         if part_pk and not part_name:
-            try:
-                r = self._request_with_retries(
-                    method="GET",
-                    url=f"{base_url.rstrip('/')}/api/part/{part_pk}/",
-                    headers=headers,
-                    timeout=20,
-                )
-                if r:
-                    d = r.json()
-                    part_name = str(d.get("name") or d.get("IPN") or f"Part #{part_pk}")
-            except Exception:
-                part_name = f"Part #{part_pk}"
+            part_name = self._fetch_part_name(part_pk, headers, base_url)
 
-        # Step 2 — Supplier-part lookup via /api/company/part/ (handles supplier barcodes)
+        # Step 2 — Supplier-part lookup (handles supplier barcodes with known supplier)
         if not part_pk and supplier != "unknown":
             self._show_status("Checking supplier part...", color="blue")
             try:
                 supplier_pk = _BarcodeApiHelpers.resolve_supplier_company_pk(self, supplier)
                 if supplier_pk > 0:
-                    probes = [v for v in [spn, mpn, lookup_value] if v]
-                    for probe in probes:
+                    for probe in [v for v in [spn, mpn, lookup_value] if v]:
                         resp2 = self._request_with_retries(
                             method="GET",
                             url=f"{base_url.rstrip('/')}/api/company/part/",
@@ -668,24 +771,12 @@ class VerificationView(BarcodeApiMixin, MainView):
                         if part_pk:
                             break
 
-                    # If we got a pk but no name from supplier lookup, fetch part detail
                     if part_pk and not part_name:
-                        try:
-                            r = self._request_with_retries(
-                                method="GET",
-                                url=f"{base_url.rstrip('/')}/api/part/{part_pk}/",
-                                headers=headers,
-                                timeout=20,
-                            )
-                            if r:
-                                d = r.json()
-                                part_name = str(d.get("name") or d.get("IPN") or f"Part #{part_pk}")
-                        except Exception:
-                            part_name = f"Part #{part_pk}"
+                        part_name = self._fetch_part_name(part_pk, headers, base_url)
             except Exception:
                 pass
 
-        # Step 3 — Exact IPN / name search via /api/part/ (fallback for plain text codes)
+        # Step 3 — Exact IPN / name search (fallback for plain-text codes)
         if not part_pk:
             self._show_status("Checking part name...", color="blue")
             for probe in [v for v in [lookup_value, mpn, spn, raw] if v]:
@@ -696,14 +787,94 @@ class VerificationView(BarcodeApiMixin, MainView):
                     break
 
         if part_pk:
-            self._mark_item_verified(part_pk, part_name or f"Part #{part_pk}", raw)
+            # Fetch where this part actually lives in InvenTree for display
+            expected_locs = self._fetch_part_locations(part_pk, headers, base_url)
+            self._mark_item_verified(
+                part_pk, part_name or f"Part #{part_pk}", raw, seq, expected_locs
+            )
         else:
-            self._add_unexpected_item(raw, supplier, lookup_value)
+            self._add_unexpected_item(raw, supplier, lookup_value, seq)
 
-    def _mark_item_verified(self, part_pk: int, part_name: str, raw: str):
-        """Find matching expected item and mark it verified, or add as unexpected."""
+    def _fast_match_mutate(self, lookup_value: str, mpn: str, spn: str, raw: str) -> Optional[str]:
+        """Mark the first matching expected item as verified under the lock.
+
+        Returns the matched part name on success, None if no match.
+        Never calls any UI methods — caller handles UI after lock is released.
+        """
+        probes = list(dict.fromkeys(v.lower() for v in [lookup_value, mpn, spn, raw] if v))
         with self._items_lock:
-            # Find first unverified expected item for this part
+            target = next(
+                (
+                    it
+                    for it in self._items
+                    if it.status == VerifyItem.STATUS_EXPECTED
+                    and any(it.part_name.lower() == p for p in probes)
+                ),
+                None,
+            )
+            if target:
+                target.status = VerifyItem.STATUS_VERIFIED
+                return target.part_name
+        return None
+
+    def _fetch_part_name(self, part_pk: int, headers: Dict, base_url: str) -> str:
+        try:
+            r = self._request_with_retries(
+                method="GET",
+                url=f"{base_url.rstrip('/')}/api/part/{part_pk}/",
+                headers=headers,
+                timeout=20,
+            )
+            if r:
+                d = r.json()
+                return str(d.get("name") or d.get("IPN") or f"Part #{part_pk}")
+        except Exception:
+            pass
+        return f"Part #{part_pk}"
+
+    def _fetch_part_locations(self, part_pk: int, headers: Dict, base_url: str) -> List[str]:
+        """Return a deduplicated list of location pathstrings where part_pk has stock."""
+        locs: List[str] = []
+        try:
+            resp = self._request_with_retries(
+                method="GET",
+                url=f"{base_url.rstrip('/')}/api/stock/",
+                headers=headers,
+                params={"part": part_pk, "limit": 100, "location_detail": True},
+                timeout=20,
+            )
+            if resp:
+                payload = resp.json()
+                rows = payload.get("results", payload) if isinstance(payload, dict) else payload
+                seen: set = set()
+                for si in rows if isinstance(rows, list) else []:
+                    loc_detail = si.get("location_detail") or {}
+                    loc_name = (
+                        loc_detail.get("pathstring")
+                        or loc_detail.get("name")
+                        or str(si.get("location") or "")
+                    ).strip()
+                    if loc_name and loc_name not in seen:
+                        seen.add(loc_name)
+                        locs.append(loc_name)
+        except Exception:
+            pass
+        return locs
+
+    def _mark_item_verified(
+        self,
+        part_pk: int,
+        part_name: str,
+        raw: str,
+        seq: int = -1,
+        expected_locs: Optional[List[str]] = None,
+    ):
+        """Find matching expected item and mark it verified, or add as unexpected.
+
+        All list mutations happen under the lock; UI calls happen after release.
+        """
+        outcome = None  # "verified" | "duplicate" | "unexpected"
+        with self._items_lock:
             target = next(
                 (
                     it
@@ -714,45 +885,54 @@ class VerificationView(BarcodeApiMixin, MainView):
             )
             if target:
                 target.status = VerifyItem.STATUS_VERIFIED
-                self._show_status(f"✓ Verified: {part_name}", color="green")
+                outcome = "verified"
+            elif part_pk > 0 and any(it.part_pk == part_pk for it in self._items):
+                outcome = "duplicate"
             else:
-                # All rows for this part are already verified
-                if part_pk > 0 and any(it.part_pk == part_pk for it in self._items):
-                    self._show_status(f"Already verified: {part_name}", color="grey")
-                    return
-                else:
-                    # Not expected at all
-                    self._items.append(
-                        VerifyItem(
-                            part_pk=part_pk,
-                            part_name=part_name,
-                            stock_pk=0,
-                            quantity="-",
-                            location=self._current_location_path,
-                        )
-                    )
-                    self._items[-1].status = VerifyItem.STATUS_UNEXPECTED
-                    self._show_status(f"Unexpected item: {part_name}", color="orange")
-
-        self._update_table_throttled(force=True)
-        self._update_counter()
-
-    def _add_unexpected_item(self, raw: str, supplier: str, lookup_value: str):
-        """Add an unresolved scan as an unexpected (red) item."""
-        display_name = lookup_value if lookup_value != raw else raw
-        with self._items_lock:
-            self._items.append(
-                VerifyItem(
-                    part_pk=0,
-                    part_name=display_name,
+                new_item = VerifyItem(
+                    part_pk=part_pk,
+                    part_name=part_name,
                     stock_pk=0,
                     quantity="-",
                     location=self._current_location_path,
                 )
+                new_item.status = VerifyItem.STATUS_UNEXPECTED
+                new_item.expected_locations = expected_locs or []
+                self._items.append(new_item)
+                outcome = "unexpected"
+
+        # UI updates outside the lock
+        if outcome == "verified":
+            self._show_status(f"✓ Verified: {part_name}", color="green")
+            self._set_scan_state(_SCAN_VERIFIED, seq=seq)
+            self._update_table_throttled(force=True)
+            self._update_counter()
+        elif outcome == "duplicate":
+            self._show_status(f"Already verified: {part_name}", color="amber")
+            self._set_scan_state(_SCAN_DUPLICATE, seq=seq)
+        else:
+            self._show_status(f"Unexpected item: {part_name}", color="red")
+            self._set_scan_state(_SCAN_UNEXPECTED, seq=seq)
+            self._update_table_throttled(force=True)
+            self._update_counter()
+
+    def _add_unexpected_item(self, raw: str, supplier: str, lookup_value: str, seq: int = -1):
+        """Add an unresolved scan as an unexpected (red) item."""
+        display_name = lookup_value if lookup_value != raw else raw
+        with self._items_lock:
+            new_item = VerifyItem(
+                part_pk=0,
+                part_name=display_name,
+                stock_pk=0,
+                quantity="-",
+                location=self._current_location_path,
             )
-            self._items[-1].status = VerifyItem.STATUS_UNEXPECTED
+            new_item.status = VerifyItem.STATUS_UNEXPECTED
+            new_item.expected_locations = []
+            self._items.append(new_item)
 
         self._show_status(f"Unrecognised scan: {display_name}", color="red")
+        self._set_scan_state(_SCAN_UNEXPECTED, seq=seq)
         self._update_table_throttled(force=True)
         self._update_counter()
 
@@ -806,6 +986,27 @@ class VerificationView(BarcodeApiMixin, MainView):
             label = self._STATUS_LABEL.get(item.status, item.status)
             row_color = self._ROW_COLOR.get(item.status)
 
+            # Location cell: for unexpected items show where InvenTree says the part lives
+            if item.status == VerifyItem.STATUS_UNEXPECTED:
+                if item.expected_locations:
+                    loc_str = " / ".join(item.expected_locations)
+                    loc_cell = ft.DataCell(
+                        ft.Text(
+                            self._truncate(loc_str, 35),
+                            size=12,
+                            color="red",
+                            weight=ft.FontWeight.BOLD,
+                            italic=True,
+                            tooltip=loc_str if len(loc_str) > 35 else None,
+                        )
+                    )
+                else:
+                    loc_cell = ft.DataCell(ft.Text("—", size=12, color="grey"))
+            else:
+                loc_cell = ft.DataCell(
+                    ft.Text(self._truncate(item.location, 30), size=12, color="grey")
+                )
+
             override_icon = ft.icons.CHECK_CIRCLE_OUTLINE
             override_tooltip = "Mark as present"
             override_color = "green"
@@ -823,14 +1024,12 @@ class VerificationView(BarcodeApiMixin, MainView):
                                 size=12,
                                 color=color,
                                 weight=ft.FontWeight.BOLD
-                                if item.status == VerifyItem.STATUS_VERIFIED
+                                if item.status != VerifyItem.STATUS_EXPECTED
                                 else ft.FontWeight.NORMAL,
                             )
                         ),
                         ft.DataCell(ft.Text(item.quantity, size=12)),
-                        ft.DataCell(
-                            ft.Text(self._truncate(item.location, 30), size=12, color="grey")
-                        ),
+                        loc_cell,
                         ft.DataCell(
                             ft.Text(
                                 label,
@@ -855,16 +1054,14 @@ class VerificationView(BarcodeApiMixin, MainView):
 
     def _update_table(self):
         rows = self._build_table_rows()
-
-        def _apply():
-            if not self.page:
-                return
-            self._items_table.rows = rows
-            self.page.update()
-
         page = self.page
-        if page:
-            page.run_thread(_apply)
+        if not page:
+            return
+        self._items_table.rows = rows
+        try:
+            page.update()
+        except Exception:
+            pass
 
     def _update_table_throttled(self, force: bool = False):
         now = time.monotonic()
