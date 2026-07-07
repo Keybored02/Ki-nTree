@@ -7,6 +7,7 @@ Manual override icon lets the user mark any item as present.
 
 import threading
 import time
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 import flet as ft
@@ -662,14 +663,19 @@ class VerificationView(BarcodeApiMixin, MainView):
         barcode_val = str(parsed.get("barcode") or "").strip()
         lookup_value = barcode_val or mpn or spn or raw
 
-        # Fast local match: if the parsed value matches an expected item's
-        # name/IPN directly we can verify without any API call.
-        fast_name = self._fast_match_mutate(lookup_value, mpn, spn, raw)
-        if fast_name is not None:
-            self._show_status(f"✓ Verified: {fast_name}", color="green")
-            self._set_scan_state(_SCAN_VERIFIED, seq=seq)
-            self._update_table_throttled(force=True)
-            self._update_counter()
+        # Fast local match: if the parsed value matches an expected or already-verified
+        # item's name/IPN directly we can skip the API entirely.
+        fast_result = self._fast_match_mutate(lookup_value, mpn, spn, raw)
+        if fast_result is not None:
+            fast_status, fast_name = fast_result
+            if fast_status.endswith("_dup"):
+                self._show_status(f"Already verified: {fast_name}", color="amber")
+                self._set_scan_state(_SCAN_DUPLICATE, seq=seq)
+            else:
+                self._show_status(f"✓ Verified: {fast_name}", color="green")
+                self._set_scan_state(_SCAN_VERIFIED, seq=seq)
+                self._update_table_throttled(force=True)
+                self._update_counter()
             return
 
         # No fast match — go to server
@@ -795,14 +801,18 @@ class VerificationView(BarcodeApiMixin, MainView):
         else:
             self._add_unexpected_item(raw, supplier, lookup_value, seq)
 
-    def _fast_match_mutate(self, lookup_value: str, mpn: str, spn: str, raw: str) -> Optional[str]:
-        """Mark the first matching expected item as verified under the lock.
+    def _fast_match_mutate(self, lookup_value: str, mpn: str, spn: str, raw: str):
+        """Try to verify an item purely from the local items list (no API call).
 
-        Returns the matched part name on success, None if no match.
+        Returns:
+          (STATUS_VERIFIED, part_name)  — matched an expected copy, now marked verified
+          (STATUS_DUPLICATE, part_name) — all copies already verified
+          None                          — no local match at all; caller must hit API
         Never calls any UI methods — caller handles UI after lock is released.
         """
         probes = list(dict.fromkeys(v.lower() for v in [lookup_value, mpn, spn, raw] if v))
         with self._items_lock:
+            # Find any expected copy first
             target = next(
                 (
                     it
@@ -814,7 +824,21 @@ class VerificationView(BarcodeApiMixin, MainView):
             )
             if target:
                 target.status = VerifyItem.STATUS_VERIFIED
-                return target.part_name
+                return (VerifyItem.STATUS_VERIFIED, target.part_name)
+
+            # No expected copy — check if there are already-verified copies
+            verified_copy = next(
+                (
+                    it
+                    for it in self._items
+                    if it.status == VerifyItem.STATUS_VERIFIED
+                    and any(it.part_name.lower() == p for p in probes)
+                ),
+                None,
+            )
+            if verified_copy:
+                return (VerifyItem.STATUS_VERIFIED + "_dup", verified_copy.part_name)
+
         return None
 
     def _fetch_part_name(self, part_pk: int, headers: Dict, base_url: str) -> str:
@@ -980,6 +1004,14 @@ class VerificationView(BarcodeApiMixin, MainView):
         }
         snapshot.sort(key=lambda it: (_order.get(it.status, 9), it.part_name.lower()))
 
+        # Pre-compute per-part_pk copy counts for the hint icon
+        pk_total: Counter = Counter(it.part_pk for it in snapshot if it.part_pk > 0)
+        pk_verified: Counter = Counter(
+            it.part_pk
+            for it in snapshot
+            if it.part_pk > 0 and it.status == VerifyItem.STATUS_VERIFIED
+        )
+
         rows = []
         for item in snapshot:
             color = self._STATUS_COLOR.get(item.status)
@@ -1015,19 +1047,41 @@ class VerificationView(BarcodeApiMixin, MainView):
                 override_tooltip = "Unmark manual override"
                 override_color = "orange"
 
+            # Copy hint: show a small green copy icon when this part has multiple
+            # stock rows and at least one sibling is already verified.
+            show_copy_hint = (
+                item.part_pk > 0
+                and pk_total[item.part_pk] > 1
+                and pk_verified[item.part_pk] > 0
+                and item.status != VerifyItem.STATUS_VERIFIED
+            )
+            copy_count = pk_total[item.part_pk]
+            copy_verified = pk_verified[item.part_pk]
+
+            name_controls = [
+                ft.Text(
+                    self._truncate(item.part_name),
+                    size=12,
+                    color=color,
+                    weight=ft.FontWeight.BOLD
+                    if item.status != VerifyItem.STATUS_EXPECTED
+                    else ft.FontWeight.NORMAL,
+                )
+            ]
+            if show_copy_hint:
+                name_controls.append(
+                    ft.Icon(
+                        name=ft.icons.COPY_ALL_OUTLINED,
+                        size=14,
+                        color="green",
+                        tooltip=f"{copy_verified}/{copy_count} copies verified",
+                    )
+                )
+
             rows.append(
                 ft.DataRow(
                     cells=[
-                        ft.DataCell(
-                            ft.Text(
-                                self._truncate(item.part_name),
-                                size=12,
-                                color=color,
-                                weight=ft.FontWeight.BOLD
-                                if item.status != VerifyItem.STATUS_EXPECTED
-                                else ft.FontWeight.NORMAL,
-                            )
-                        ),
+                        ft.DataCell(ft.Row(controls=name_controls, spacing=4, tight=True)),
                         ft.DataCell(ft.Text(item.quantity, size=12)),
                         loc_cell,
                         ft.DataCell(
